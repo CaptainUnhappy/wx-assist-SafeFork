@@ -92,7 +92,8 @@ jobs:
           push_ref() {
             local kind=$1 name=$2 expected=$3 staged actual
             staged="refs/safefork/$kind/$name"
-            git -C "$push_dir" fetch --quiet --no-tags --depth=1 "https://github.com/$UPSTREAM_REPO.git" "refs/$kind/$name:$staged"
+            # Ordinary push needs complete ancestry to prove a fast-forward.
+            git -C "$push_dir" fetch --quiet --no-tags "https://github.com/$UPSTREAM_REPO.git" "refs/$kind/$name:$staged"
             actual=$(git -C "$push_dir" rev-parse "$staged")
             if [ "$actual" != "$expected" ]; then
               report "::error::$kind/$name fetched SHA differs from the locked source SHA."
