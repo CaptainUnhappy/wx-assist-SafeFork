@@ -36,7 +36,9 @@ class TestAssistantConfig(unittest.TestCase):
         cfg.assistant_enabled = True
         cfg.rag_enabled = True
         cfg.alert_groups.append(config_mod.AlertGroup(
-            group_name="测试群",
+            id="ag_001",
+            name="测试群",
+            chats=[config_mod.AlertChat(chat_id="g@chatroom", name="测试群")],
             keywords=["派单", "急"],
             enabled=True,
         ))
@@ -46,8 +48,9 @@ class TestAssistantConfig(unittest.TestCase):
         self.assertTrue(cfg2.assistant_enabled)
         self.assertTrue(cfg2.rag_enabled)
         self.assertEqual(len(cfg2.alert_groups), 1)
-        self.assertEqual(cfg2.alert_groups[0].group_name, "测试群")
+        self.assertEqual(cfg2.alert_groups[0].name, "测试群")
         self.assertEqual(cfg2.alert_groups[0].keywords, ["派单", "急"])
+        self.assertEqual(cfg2.alert_groups[0].chats[0].chat_id, "g@chatroom")
 
     def test_digest_group_with_profile(self):
         cfg = config_mod.load_assistant_config()

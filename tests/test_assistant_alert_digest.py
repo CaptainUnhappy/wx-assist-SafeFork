@@ -6,7 +6,7 @@ import unittest
 from src.assistant.alert import AlertEngine
 from src.assistant.digest import filter_messages, build_digest_prompt, generate_memory_update_prompt
 from src.assistant.config import (
-    AssistantConfig, AlertGroup, DigestChat, DigestGroup, GroupProfile,
+    AssistantConfig, AlertChat, AlertGroup, DigestChat, DigestGroup, GroupProfile,
 )
 from src.assistant.outbox import Outbox
 
@@ -16,12 +16,15 @@ class TestAlertEngine(unittest.TestCase):
     def test_keyword_match(self):
         cfg = AssistantConfig(assistant_enabled=True)
         cfg.alert_groups = [
-            AlertGroup(group_name="抢单群A", keywords=["派单", "急单"], enabled=True),
+            AlertGroup(id="ag_001", name="抢单群A",
+                       chats=[AlertChat(chat_id="a@chatroom", name="抢单群A")],
+                       keywords=["派单", "急单"], enabled=True),
         ]
         outbox = Outbox()
         engine = AlertEngine(cfg, outbox)
 
         msg = {
+            "chat_id": "a@chatroom",
             "group_name": "抢单群A",
             "sender_name": "张三",
             "content": "急单！谁接 报价500 明天就要",
@@ -31,9 +34,12 @@ class TestAlertEngine(unittest.TestCase):
         self.assertIsNotNone(nid)
 
     def test_keyword_case_insensitive(self):
+        """只有群名、没有 chat_id 的旧条目仍按名字匹配（agent 工具建的组）。"""
         cfg = AssistantConfig(assistant_enabled=True)
         cfg.alert_groups = [
-            AlertGroup(group_name="测试群", keywords=["需求", "报价"], enabled=True),
+            AlertGroup(id="ag_001", name="测试群",
+                       chats=[AlertChat(chat_id="", name="测试群")],
+                       keywords=["需求", "报价"], enabled=True),
         ]
         outbox = Outbox()
         engine = AlertEngine(cfg, outbox)
@@ -50,12 +56,15 @@ class TestAlertEngine(unittest.TestCase):
     def test_no_match(self):
         cfg = AssistantConfig(assistant_enabled=True)
         cfg.alert_groups = [
-            AlertGroup(group_name="抢单群A", keywords=["派单"], enabled=True),
+            AlertGroup(id="ag_001", name="抢单群A",
+                       chats=[AlertChat(chat_id="a@chatroom", name="抢单群A")],
+                       keywords=["派单"], enabled=True),
         ]
         outbox = Outbox()
         engine = AlertEngine(cfg, outbox)
 
         msg = {
+            "chat_id": "a@chatroom",
             "group_name": "抢单群A",
             "sender_name": "张三",
             "content": "哈哈 今天天气真好",
@@ -64,15 +73,76 @@ class TestAlertEngine(unittest.TestCase):
         nid = engine.check(msg)
         self.assertIsNone(nid)
 
+    def test_other_chat_in_same_config_does_not_match(self):
+        """分组只覆盖组内会话，别的群发同样的词不能触发。"""
+        cfg = AssistantConfig(assistant_enabled=True)
+        cfg.alert_groups = [
+            AlertGroup(id="ag_001", name="抢单群A",
+                       chats=[AlertChat(chat_id="a@chatroom", name="抢单群A")],
+                       keywords=["派单"], enabled=True),
+        ]
+        outbox = Outbox()
+        engine = AlertEngine(cfg, outbox)
+
+        nid = engine.check({
+            "chat_id": "other@chatroom", "group_name": "别的群",
+            "content": "派单！", "timestamp": int(time.time()),
+        })
+        self.assertIsNone(nid)
+
+    def test_multi_chat_group_shares_keywords(self):
+        """一个组里多个会话共用同一份关键词，每个都能触发。"""
+        cfg = AssistantConfig(assistant_enabled=True)
+        cfg.alert_groups = [
+            AlertGroup(id="ag_001", name="证券单组",
+                       chats=[AlertChat(chat_id="a@chatroom", name="群A"),
+                              AlertChat(chat_id="b@chatroom", name="群B")],
+                       keywords=["100万"], enabled=True),
+        ]
+        outbox = Outbox()
+        engine = AlertEngine(cfg, outbox)
+
+        for cid, gname in (("a@chatroom", "群A"), ("b@chatroom", "群B")):
+            with self.subTest(chat=cid):
+                nid = engine.check({
+                    "chat_id": cid, "group_name": gname,
+                    "content": "出100万", "timestamp": int(time.time()),
+                })
+                self.assertIsNotNone(nid)
+
+    def test_chat_level_disabled_skips_only_that_chat(self):
+        """会话级开关关掉后，同组其他会话照常提醒。"""
+        cfg = AssistantConfig(assistant_enabled=True)
+        cfg.alert_groups = [
+            AlertGroup(id="ag_001", name="证券单组",
+                       chats=[AlertChat(chat_id="a@chatroom", name="群A", enabled=False),
+                              AlertChat(chat_id="b@chatroom", name="群B", enabled=True)],
+                       keywords=["100万"], enabled=True),
+        ]
+        outbox = Outbox()
+        engine = AlertEngine(cfg, outbox)
+
+        self.assertIsNone(engine.check({
+            "chat_id": "a@chatroom", "group_name": "群A",
+            "content": "出100万", "timestamp": int(time.time()),
+        }))
+        self.assertIsNotNone(engine.check({
+            "chat_id": "b@chatroom", "group_name": "群B",
+            "content": "出100万", "timestamp": int(time.time()),
+        }))
+
     def test_disabled_group(self):
         cfg = AssistantConfig(assistant_enabled=True)
         cfg.alert_groups = [
-            AlertGroup(group_name="抢单群A", keywords=["派单"], enabled=False),
+            AlertGroup(id="ag_001", name="抢单群A",
+                       chats=[AlertChat(chat_id="a@chatroom", name="抢单群A")],
+                       keywords=["派单"], enabled=False),
         ]
         outbox = Outbox()
         engine = AlertEngine(cfg, outbox)
 
         msg = {
+            "chat_id": "a@chatroom",
             "group_name": "抢单群A",
             "content": "急单派单！",
             "timestamp": int(time.time()),

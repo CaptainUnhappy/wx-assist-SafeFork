@@ -30,9 +30,24 @@ class OAFullTextFetchConfig:
 
 
 @dataclass
+class AlertChat:
+    """提醒分组内的一个会话。"""
+    chat_id: str = ""       # 全配置内唯一 —— 一个会话只能属于一个提醒分组；
+                            # 为空时引擎按 name 匹配（agent 工具建的旧条目）
+    name: str = ""          # 显示名快照
+    enabled: bool = True    # 会话级开关：分组开着但这个会话不提醒
+
+
+@dataclass
 class AlertGroup:
-    chat_id: str = ""
-    group_name: str = ""
+    """关键词即时提醒的一个**分组**：组内所有会话共用一份关键词。
+
+    与 DigestGroup 同构（id / name / 成员列表 / push_target），差别是提醒没有
+    调度与组记忆。旧的"一个会话一条配置"由 `_parse_alert_groups` 迁移成单会话分组。
+    """
+    id: str = ""                                           # 唯一 id: "ag_001"
+    name: str = ""                                         # 分组显示名
+    chats: list[AlertChat] = field(default_factory=list)    # 组内会话
     keywords: list[str] = field(default_factory=list)
     enabled: bool = True
     push_target: str = ""  # "" | "ilink"
@@ -258,9 +273,13 @@ def _config_to_dict(cfg: AssistantConfig) -> dict:
     }
     for ag in cfg.alert_groups:
         result["alert_groups"].append({
-            "chat_id": ag.chat_id,
-            "group_name": ag.group_name,
-            "keywords": ag.keywords,
+            "id": ag.id,
+            "name": ag.name,
+            "chats": [
+                {"chat_id": c.chat_id, "name": c.name, "enabled": c.enabled}
+                for c in ag.chats
+            ],
+            "keywords": list(ag.keywords),
             "enabled": ag.enabled,
             "push_target": ag.push_target,
         })
@@ -409,6 +428,92 @@ def _next_digest_group_id(used: set) -> str:
     return gid
 
 
+def _next_alert_group_id(used: set) -> str:
+    """生成 ag_001 式唯一 id（写法对齐 _next_digest_group_id）。"""
+    n = len(used) + 1
+    gid = f"ag_{n:03d}"
+    while gid in used:
+        n += 1
+        gid = f"ag_{n:03d}"
+    return gid
+
+
+def _parse_alert_groups(raw_list) -> list:
+    """解析 alert_groups，并把旧的"一会话一条"shape 迁移成单会话分组。
+
+    纯函数、幂等、**不抛异常**：理由同 `_parse_digest_groups` ——
+    `load_assistant_config` 的 except 分支会用默认配置覆盖整份文件，解析期
+    任何一次抛错都会永久抹掉用户所有提醒配置。脏数据只 warning + 回落默认值。
+    """
+    if not isinstance(raw_list, list):
+        return []
+
+    groups = []
+    used_ids: set = set()
+    used_chats: dict = {}          # chat_id -> 组名，用于跨组去重
+
+    for item in raw_list:
+        if not isinstance(item, dict):
+            continue
+
+        gid = str(item.get("id") or "").strip()
+        if not gid:
+            gid = _next_alert_group_id(used_ids)
+        used_ids.add(gid)
+
+        gname = str(item.get("name") or item.get("group_name") or "").strip() or gid
+
+        raw_chats = item.get("chats")
+        if isinstance(raw_chats, list):
+            chats = []
+            for c in raw_chats:
+                if not isinstance(c, dict):
+                    continue
+                cid = str(c.get("chat_id") or "").strip()
+                cname = str(c.get("name") or "").strip()
+                if not cid and not cname:
+                    continue
+                if cid and cid in used_chats:
+                    logger.warning("提醒：会话 %s 同时出现在「%s」和「%s」，保留前者",
+                                   cid, used_chats[cid], gname)
+                    continue
+                if cid:
+                    used_chats[cid] = gname
+                chats.append(AlertChat(
+                    chat_id=cid, name=cname,
+                    enabled=bool(c.get("enabled", True)),
+                ))
+        else:
+            # ── 旧 shape：chat_id / group_name → 单会话分组 ──
+            legacy_cid = str(item.get("chat_id") or "").strip()
+            has_legacy_name = str(item.get("group_name") or "").strip() != ""
+            if legacy_cid and legacy_cid in used_chats:
+                logger.warning("提醒迁移：会话 %s 已被「%s」占用，「%s」的会话置空",
+                               legacy_cid, used_chats[legacy_cid], gname)
+                chats = []
+            elif legacy_cid or has_legacy_name:
+                # chat_id 为空但 group_name 有值：agent 工具建的旧条目，引擎按
+                # 名字匹配，保留 name 让用户之后能在网页端重新绑定。
+                if legacy_cid:
+                    used_chats[legacy_cid] = gname
+                chats = [AlertChat(chat_id=legacy_cid, name=gname, enabled=True)]
+            else:
+                logger.warning("提醒分组「%s」没有可用会话，请在网页端重新绑定", gname)
+                chats = []
+
+        groups.append(AlertGroup(
+            id=gid,
+            name=gname,
+            chats=chats,
+            # 原样带过去（含空列表和非字符串脏数据），保持既有匹配行为不变：
+            # 非字符串条目由 alert.check() 跳过，不在解析期静默丢弃。
+            keywords=list(item.get("keywords") or []),
+            enabled=bool(item.get("enabled", True)),
+            push_target=str(item.get("push_target") or ""),
+        ))
+    return groups
+
+
 def _parse_digest_groups(raw_list) -> list:
     """解析 digest_groups，并把旧的"一会话一条"shape 迁移成单会话分组。
 
@@ -553,6 +658,46 @@ def validate_digest_groups(raw_list) -> str:
     return ""
 
 
+def validate_alert_groups(raw_list) -> str:
+    """校验前端提交的 alert_groups。返回 "" 表示合法，非空为可直接展示的错误。
+
+    与 validate_digest_groups 同规则（名字非空、至少一个会话、chat_id 跨组唯一），
+    差别：允许只有 name、没有 chat_id 的会话 —— agent 工具建的旧条目就是这个
+    shape，引擎按名字匹配，不能因为校验把它们挡在保存之外。
+    """
+    if not isinstance(raw_list, list):
+        return "提醒分组格式不正确"
+    seen: dict = {}
+    for item in raw_list:
+        if not isinstance(item, dict):
+            return "提醒分组格式不正确"
+        name = str(item.get("name") or item.get("group_name") or "").strip()
+        if not name:
+            return "提醒分组名称不能为空"
+
+        raw_chats = item.get("chats")
+        if isinstance(raw_chats, list):
+            entries = [c for c in raw_chats if isinstance(c, dict)]
+        elif str(item.get("chat_id") or "").strip() or str(item.get("group_name") or "").strip():
+            entries = [{"chat_id": str(item.get("chat_id") or "").strip(),
+                        "name": str(item.get("group_name") or "").strip()}]
+        else:
+            entries = []
+
+        if not entries:
+            return f"提醒分组「{name}」至少要选择一个会话"
+
+        for c in entries:
+            cid = str(c.get("chat_id") or "").strip()
+            if not cid:
+                continue
+            if cid in seen:
+                return (f"「{seen[cid]}」和「{name}」重复使用了同一个会话，"
+                        f"一个会话只能属于一个提醒分组")
+            seen[cid] = name
+    return ""
+
+
 def _dict_to_config(data: dict) -> AssistantConfig:
     """Deserialize dict to AssistantConfig."""
     # --- fav_export ---
@@ -577,14 +722,7 @@ def _dict_to_config(data: dict) -> AssistantConfig:
         enabled=_ftf.get("enabled", True),
         ignore_gh_ids=list(_ftf.get("ignore_gh_ids") or []),
     )
-    for ag_data in data.get("alert_groups", []):
-        cfg.alert_groups.append(AlertGroup(
-            chat_id=ag_data.get("chat_id", ""),
-            group_name=ag_data.get("group_name", ""),
-            keywords=ag_data.get("keywords", []),
-            enabled=ag_data.get("enabled", True),
-            push_target=ag_data.get("push_target", ""),
-        ))
+    cfg.alert_groups = _parse_alert_groups(data.get("alert_groups") or [])
     for omg_data in data.get("oa_monitor_groups", []):
         cfg.oa_monitor_groups.append(OAMonitorGroup(
             id=omg_data.get("id", ""),

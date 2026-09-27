@@ -91,7 +91,7 @@ function KeywordAlertCard({ onTabChange }) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 flex-wrap">
           {totalAlerts > 0 && (
-            <span className="text-sm text-text-main font-semibold">{totalAlerts} 个提醒群</span>
+            <span className="text-sm text-text-main font-semibold">{totalAlerts} 个提醒分组</span>
           )}
           {totalOa > 0 && (
             <span className="text-sm text-text-main font-semibold">{totalOa} 个公众号</span>
@@ -145,7 +145,12 @@ function KeywordAlertCard({ onTabChange }) {
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-sm text-text-main font-semibold truncate">{ag.group_name || ag.chat_id || `提醒群 #${i + 1}`}</span>
+                        <span className="text-sm text-text-main font-semibold truncate">{ag.name || `提醒分组 #${i + 1}`}</span>
+                        {(ag.chats || []).length > 0 && (
+                          <span className="text-xs text-text-muted bg-bg-raised px-1.5 py-px rounded flex-shrink-0">
+                            {ag.chats.length} 个会话
+                          </span>
+                        )}
                         {ag.enabled !== false && (
                           <span className="text-xs font-mono font-bold text-brand-green bg-brand-green/[0.08] dark:bg-brand-green/[0.12] px-1.5 py-px rounded flex items-center gap-0.5">
                             <PaperPlaneTilt size={8} />推送

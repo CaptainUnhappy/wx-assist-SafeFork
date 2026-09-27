@@ -271,7 +271,7 @@ export default function AssistantPanel() {
   // Inline editors
   const [showAlertEditor, setShowAlertEditor] = useState(false)
   const [showDigestEditor, setShowDigestEditor] = useState(false)
-  const [alertDraft, setAlertDraft] = useState({ chat_id: '', group_name: '', keywords: [], enabled: true, push_target: 'ilink' })
+  const [alertDraft, setAlertDraft] = useState({ id: '', name: '', chats: [], keywords: [], enabled: true, push_target: 'ilink' })
   const [digestDraft, setDigestDraft] = useState({
     id: '', name: '', chats: [], schedule: [], cron_expr: '', lookback_hours: 6, lookback_mode: 'manual', enabled: true,
     unread_only: false, push_target: 'ilink', memory_enabled: true, memory: '', memory_rev: 0,
@@ -398,7 +398,12 @@ export default function AssistantPanel() {
       ...defaultConfig(),
       ...raw,
       notification_queue: queue,
-      alert_groups: (raw.alert_groups || []).map(item => ({ chat_id: '', ...item })),
+      alert_groups: (raw.alert_groups || []).map((item, idx) => ({
+        ...item,
+        id: item.id || `local_ag_${idx}`,
+        name: item.name ?? item.group_name ?? '',
+        chats: (item.chats || []).map(c => ({ enabled: true, ...c })),
+      })),
       digest_groups: (raw.digest_groups || []).map((item, idx) => ({
         ...item,
         id: item.id || `local_${idx}`,
@@ -497,10 +502,6 @@ export default function AssistantPanel() {
     })
   }
 
-  function findGroup(chatId) {
-    return groups.find(g => g.chat_id === chatId)
-  }
-
   // 一个 chat_id 只能归属一个摘要分组，picker 用它禁用已被别的分组占用的会话
   function buildOccupied(excludeId) {
     const map = {}
@@ -513,15 +514,16 @@ export default function AssistantPanel() {
     return map
   }
 
-  function applyGroupToAlert(index, chatId) {
-    const selected = findGroup(chatId)
-    const next = [...(config.alert_groups || [])]
-    next[index] = {
-      ...next[index],
-      chat_id: chatId,
-      group_name: selected?.group_name || next[index].group_name || '',
+  // 一个 chat_id 只能归属一个提醒分组，picker 用它禁用已被别的分组占用的会话
+  function buildAlertOccupied(excludeId) {
+    const map = {}
+    for (const g of (config.alert_groups || [])) {
+      if (g.id === excludeId) continue
+      for (const c of (g.chats || [])) {
+        if (c.chat_id) map[c.chat_id] = g.name || g.id
+      }
     }
-    update('alert_groups', next)
+    return map
   }
 
   async function save() {
@@ -707,6 +709,7 @@ export default function AssistantPanel() {
                     ag={ag}
                     index={i}
                     groups={groups}
+                    occupied={buildAlertOccupied(ag.id)}
                     expanded={!!expandedAlerts[i]}
                     draft={alertDrafts[i] || null}
                     onToggleExpand={() => {
@@ -731,9 +734,11 @@ export default function AssistantPanel() {
                       const next = config.alert_groups.filter((_, idx) => idx !== i)
                       updateAndSaveNow('alert_groups', next)
                     }}
-                    onSelectGroup={chatId => {
-                      const selected = findGroup(chatId)
-                      setAlertDrafts(prev => ({ ...prev, [i]: { ...prev[i], chat_id: chatId, group_name: selected?.group_name || prev[i]?.group_name || '' } }))
+                    onNameChange={name => {
+                      setAlertDrafts(prev => ({ ...prev, [i]: { ...prev[i], name } }))
+                    }}
+                    onSelectChats={chats => {
+                      setAlertDrafts(prev => ({ ...prev, [i]: { ...prev[i], chats } }))
                     }}
                     onKeywordsChange={keywords => {
                       setAlertDrafts(prev => ({ ...prev, [i]: { ...prev[i], keywords } }))
@@ -745,26 +750,23 @@ export default function AssistantPanel() {
                     onSave={() => {
                       const draft = alertDrafts[i]
                       if (!draft) return
-                      const next = [...config.alert_groups]
-                      // If chat_id changed, check for conflict with another group → merge
-                      if (draft.chat_id && draft.chat_id !== config.alert_groups[i].chat_id) {
-                        const conflictIdx = next.findIndex((g, idx) => idx !== i && g.chat_id === draft.chat_id)
-                        if (conflictIdx >= 0) {
-                          const merged = [...new Set([...next[conflictIdx].keywords, ...(draft.keywords || [])])]
-                          next[conflictIdx] = { ...next[conflictIdx], keywords: merged }
-                          next.splice(i, 1)
-                          setConfig(prev => ({ ...prev, alert_groups: next }))
-                          scheduleAutoSave({ ...config, alert_groups: next }, true)
-                          setAlertDrafts(prev => { const n = { ...prev }; delete n[i]; return n })
-                          setExpandedAlerts(prev => ({ ...prev, [i]: false }))
-                          return
-                        }
+                      const name = (draft.name || '').trim()
+                      if (!name) { flashSaveError('请填写分组名称'); return }
+                      const chats = draft.chats || []
+                      if (!chats.length) { flashSaveError('请至少选择一个会话'); return }
+                      // picker 里已 disable 被占用的会话，这里是双保险
+                      const occupiedMap = buildAlertOccupied(ag.id)
+                      const conflict = chats.find(c => occupiedMap[c.chat_id])
+                      if (conflict) {
+                        flashSaveError(`"${conflict.name || conflict.chat_id}" 已在提醒分组「${occupiedMap[conflict.chat_id]}」中`)
+                        return
                       }
+                      const next = [...config.alert_groups]
                       // Strip enabled from draft — toggle is handled independently
                       // by onToggleEnabled which saves immediately.
                       // Merging draft's stale enabled would undo the user's toggle.
-                      const { enabled: _enabled, ...safeDraft } = draft || {}
-                      next[i] = { ...next[i], ...safeDraft }
+                      const { enabled: _enabled, ...safeDraft } = draft
+                      next[i] = { ...next[i], ...safeDraft, name, chats }
                       setConfig(prev => ({ ...prev, alert_groups: next }))
                       scheduleAutoSave({ ...config, alert_groups: next }, true)
                       setAlertDrafts(prev => { const n = { ...prev }; delete n[i]; return n })
@@ -783,11 +785,11 @@ export default function AssistantPanel() {
             {!config.alert_groups?.length && !showAlertEditor && (
               <div className="py-10 text-center">
                 <Lightning size={32} className="text-text-muted/30 mx-auto mb-3" />
-                <p className="text-sm text-text-muted">添加联系人以配置关键词提醒</p>
+                <p className="text-sm text-text-muted">新建提醒分组，一个分组可包含多个会话、共用一份关键词</p>
                 <button
-                  onClick={() => { setShowAlertEditor(true); setAlertDraft({ chat_id: '', group_name: '', keywords: [], enabled: true, push_target: 'ilink' }); setEditorError('') }}
+                  onClick={() => { setShowAlertEditor(true); setAlertDraft({ id: '', name: '', chats: [], keywords: [], enabled: true, push_target: 'ilink' }); setEditorError('') }}
                   className="mt-4 text-sm text-brand-green-hover hover:underline cursor-pointer font-medium"
-                >+ 添加提醒群</button>
+                >+ 添加提醒分组</button>
               </div>
             )}
 
@@ -806,28 +808,24 @@ export default function AssistantPanel() {
                     draft={alertDraft}
                     groups={groups}
                     error={editorError}
+                    occupied={buildAlertOccupied('')}
                     onDraftChange={setAlertDraft}
                     onSave={() => {
-                      if (!alertDraft.chat_id) { setEditorError('请先选择联系人'); return }
-                      const selected = findGroup(alertDraft.chat_id)
-                      const groups = config.alert_groups || []
-
-                      // Same chat_id → merge keywords (dedup), don't create new row
-                      const existing = groups.find(g => g.chat_id === alertDraft.chat_id)
-                      if (existing) {
-                        const merged = [...new Set([...existing.keywords, ...alertDraft.keywords])]
-                        const next = groups.map(g =>
-                          g.chat_id === alertDraft.chat_id ? { ...g, keywords: merged } : g
-                        )
-                        updateAndSaveNow('alert_groups', next)
-                        setShowAlertEditor(false)
-                        setEditorError('')
+                      const name = (alertDraft.name || '').trim()
+                      if (!name) { setEditorError('请填写分组名称'); return }
+                      const chats = alertDraft.chats || []
+                      if (!chats.length) { setEditorError('请至少选择一个会话'); return }
+                      // picker 里已 disable 被占用的会话，这里是双保险
+                      const occupiedMap = buildAlertOccupied('')
+                      const conflict = chats.find(c => occupiedMap[c.chat_id])
+                      if (conflict) {
+                        setEditorError(`"${conflict.name || conflict.chat_id}" 已在提醒分组「${occupiedMap[conflict.chat_id]}」中`)
                         return
                       }
-
-                      const next = [...groups, {
+                      const next = [...(config.alert_groups || []), {
                         ...alertDraft,
-                        group_name: selected?.group_name || alertDraft.group_name || '',
+                        name,
+                        chats,
                       }]
                       updateAndSaveNow('alert_groups', next)
                       setShowAlertEditor(false)
@@ -842,10 +840,10 @@ export default function AssistantPanel() {
             {/* 有群时的添加按钮 */}
             {(config.alert_groups?.length > 0 || showAlertEditor) && !showAlertEditor && (
               <button
-                onClick={() => { setShowAlertEditor(true); setAlertDraft({ chat_id: '', group_name: '', keywords: [], enabled: true, push_target: 'ilink' }); setEditorError('') }}
+                onClick={() => { setShowAlertEditor(true); setAlertDraft({ id: '', name: '', chats: [], keywords: [], enabled: true, push_target: 'ilink' }); setEditorError('') }}
                 className="w-full py-3.5 text-sm text-text-muted hover:text-brand-green border border-dashed border-border-main hover:border-brand-green/40 rounded-xl transition-all duration-200 cursor-pointer bg-bg-raised/30 hover:bg-brand-green/5"
               >
-                + 添加提醒群
+                + 添加提醒分组
               </button>
             )}
           </div>
@@ -1257,10 +1255,13 @@ export default function AssistantPanel() {
 
 // ── Sub-components ─────────────────────────────────────────────────
 
-function AlertGroupCard({ ag, index, groups, expanded, draft, onToggleExpand, onToggleEnabled, onDelete, onSelectGroup, onKeywordsChange, onPushTargetChange, onSave, onCancel }) {
+function AlertGroupCard({ ag, index, groups, occupied, expanded, draft, onToggleExpand, onToggleEnabled, onDelete, onNameChange, onSelectChats, onKeywordsChange, onPushTargetChange, onSave, onCancel }) {
   const bodyRef = useRef(null)
   // Use draft if available (editing), otherwise use saved values
   const values = draft || ag
+  // 迁移过来的老条目可能只有群名、没有 chat_id —— 引擎按名字匹配仍能工作，
+  // 但提示用户重新绑定，否则改名后就再也匹配不上。
+  const unbound = (values.chats || []).filter(c => !c.chat_id)
 
   return (
     <div className="border border-border-main rounded-xl overflow-hidden transition-all duration-200 hover:border-border-main/80">
@@ -1271,9 +1272,14 @@ function AlertGroupCard({ ag, index, groups, expanded, draft, onToggleExpand, on
       >
         <Toggle enabled={ag.enabled} onChange={onToggleEnabled} />
         <div className="flex-1 min-w-0">
-          <span className="text-sm text-text-main font-medium truncate block">
-            {values.group_name || `提醒群 #${index + 1}`}
-          </span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-sm text-text-main font-medium truncate">
+              {values.name || `提醒分组 #${index + 1}`}
+            </span>
+            <span className="text-xs px-1.5 py-0.5 rounded bg-bg-raised text-text-muted font-medium shrink-0">
+              {values.chats?.length || 0} 个会话
+            </span>
+          </div>
           <div className="flex gap-1 mt-1 flex-wrap items-center">
             {(values.keywords || []).map((kw, ki) => (
               <span
@@ -1310,16 +1316,32 @@ function AlertGroupCard({ ag, index, groups, expanded, draft, onToggleExpand, on
             }}
           >
             <div ref={bodyRef} className="px-4 pb-4 space-y-3 border-t border-border-main/50 pt-4 mx-4">
+              {/* Group name */}
+              <div>
+                <label className="text-xs text-text-muted block mb-1.5">分组名称 <span className="text-status-error">*</span></label>
+                <Input
+                  value={values.name || ''}
+                  onChange={onNameChange}
+                  placeholder="给这个提醒分组起个名字"
+                />
+              </div>
+              {/* 组内会话（多选，与摘要分组同一个 picker） */}
               <div>
                 <label className="text-xs text-text-muted block mb-1.5">选择联系人</label>
-                <SearchableGroupSelect
+                <MultiChatPicker
                   groups={groups}
-                  value={values.chat_id || ''}
-                  onChange={onSelectGroup}
-                  placeholder="搜索联系人..."
+                  value={values.chats || []}
+                  onChange={onSelectChats}
+                  occupied={occupied || {}}
                 />
-                {!values.chat_id && values.group_name && (
-                  <p className="text-xs text-status-warn mt-1">历史群名：{values.group_name}，请从下拉重新绑定</p>
+                {!(values.chats || []).length && (
+                  <p className="text-xs text-status-warn mt-1">该分组没有可用会话，请重新绑定</p>
+                )}
+                {unbound.length > 0 && (
+                  <p className="text-xs text-status-warn mt-1">
+                    {unbound.map(c => c.name).join('、')} 只有群名没有会话 ID（历史配置），
+                    目前按群名匹配，建议在上面重新选择以绑定
+                  </p>
                 )}
               </div>
               <div>
@@ -1874,22 +1896,28 @@ function DigestGroupCard({ dg, index, groups, expanded, profileExpanded, draft, 
   )
 }
 
-function AlertGroupEditor({ draft, groups, error, onDraftChange, onSave, onCancel }) {
+function AlertGroupEditor({ draft, groups, error, occupied, onDraftChange, onSave, onCancel }) {
   return (
     <div className="border border-brand-green/30 rounded-xl p-4 space-y-3 bg-brand-green/[0.02]">
-      <p className="text-sm text-brand-green font-semibold mb-1">新增提醒群</p>
+      <p className="text-sm text-brand-green font-semibold mb-1">新增提醒分组</p>
       {error && <p className="text-xs text-status-error">{error}</p>}
       <div>
-        <label className="text-xs text-text-muted block mb-1.5">选择联系人 <span className="text-status-error">*</span></label>
-        <SearchableGroupSelect
-          groups={groups}
-          value={draft.chat_id || ''}
-          onChange={chatId => {
-            const selected = groups.find(g => g.chat_id === chatId)
-            onDraftChange({ ...draft, chat_id: chatId, group_name: selected?.group_name || '' })
-          }}
-          placeholder="搜索联系人..."
+        <label className="text-xs text-text-muted block mb-1.5">分组名称 <span className="text-status-error">*</span></label>
+        <Input
+          value={draft.name || ''}
+          onChange={name => onDraftChange({ ...draft, name })}
+          placeholder="给这个提醒分组起个名字"
         />
+      </div>
+      <div>
+        <label className="text-xs text-text-muted block mb-1.5">选择联系人 <span className="text-status-error">*</span></label>
+        <MultiChatPicker
+          groups={groups}
+          value={draft.chats || []}
+          onChange={chats => onDraftChange({ ...draft, chats })}
+          occupied={occupied || {}}
+        />
+        <p className="text-xs text-text-muted mt-1.5">组内所有会话共用下面这份关键词</p>
       </div>
       <div>
         <label className="text-xs text-text-muted block mb-1.5">关键词</label>

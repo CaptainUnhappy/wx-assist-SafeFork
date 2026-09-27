@@ -3,7 +3,9 @@ from unittest.mock import MagicMock, patch
 
 from src.agent.tools import ToolExecutor
 from src.assistant.alert import AlertEngine
-from src.assistant.config import AlertGroup, AssistantConfig, DigestGroup, OAGroup
+from src.assistant.config import (
+    AlertChat, AlertGroup, AssistantConfig, DigestGroup, OAGroup,
+)
 from src.assistant.scheduler import DigestScheduler
 from src.scheduler.cron_scheduler import CronScheduler
 from src.web import api_handlers
@@ -322,7 +324,9 @@ def test_keyword_alert_pushes_when_legacy_target_is_empty():
     delivery = _RecordingDelivery()
     config = AssistantConfig(assistant_enabled=True)
     config.alert_groups = [AlertGroup(
-        group_name="测试群", keywords=["关键词"], enabled=True, push_target="",
+        id="ag_001", name="测试群",
+        chats=[AlertChat(chat_id="group-1", name="测试群")],
+        keywords=["关键词"], enabled=True, push_target="",
     )]
     engine = AlertEngine(config, outbox)
 

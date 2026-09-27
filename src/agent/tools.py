@@ -13,11 +13,13 @@ from datetime import datetime
 from src.assistant.config import (
     load_assistant_config,
     mutate_config,
+    AlertChat,
     AlertGroup,
     DigestChat,
     DigestGroup,
     OAGroup,
     OAMonitorGroup,
+    _next_alert_group_id,
     _next_digest_group_id,
     is_regex_keyword,
     validate_alert_keywords,
@@ -684,7 +686,12 @@ class ToolExecutor:
             kws = ", ".join(g.keywords[:5])
             if len(g.keywords) > 5:
                 kws += f" 等 {len(g.keywords)} 个关键词"
-            lines.append(f"{i}. {g.group_name} — 关键词: {kws}")
+            chats = "、".join(
+                (c.name or c.chat_id) for c in g.chats[:3] if c.enabled
+            )
+            if len([c for c in g.chats if c.enabled]) > 3:
+                chats += f" 等 {len([c for c in g.chats if c.enabled])} 个会话"
+            lines.append(f"{i}. {g.name} — 会话: {chats or '（未绑定）'} — 关键词: {kws}")
         return "\n".join(lines)
 
     # ── list_oa_groups ───────────────────────────────────────────────
@@ -1030,20 +1037,35 @@ class ToolExecutor:
         outcome: dict = {}
 
         def _apply(cfg):
-            existing = [g for g in cfg.alert_groups if g.group_name == group_name]
-            if existing:
-                old_count = len(existing[0].keywords)
-                existing[0].keywords = list(set(existing[0].keywords + keywords))
+            # Agent 只拿得到会话名，所以按"组名 或 组内任一会话名"定位已有分组；
+            # 找不到就建一个单会话分组（chat_id 留空，引擎按名字匹配 —— 与改造前
+            # 的 AlertGroup(group_name=...) 行为一致）。
+            target = None
+            for g in cfg.alert_groups:
+                if g.name == group_name:
+                    target = g
+                    break
+                if any(c.name == group_name for c in g.chats):
+                    target = g
+                    break
+            if target is not None:
+                old_count = len(target.keywords)
+                target.keywords = list(set(target.keywords + keywords))
                 outcome["updated"] = True
-                outcome["added"] = len(existing[0].keywords) - old_count
-                outcome["count"] = len(existing[0].keywords)
+                outcome["added"] = len(target.keywords) - old_count
+                outcome["count"] = len(target.keywords)
+                outcome["group"] = target.name
             else:
+                used = {g.id for g in cfg.alert_groups if g.id}
                 cfg.alert_groups.append(AlertGroup(
-                    group_name=group_name,
-                    keywords=keywords,
+                    id=_next_alert_group_id(used),
+                    name=group_name,
+                    chats=[AlertChat(chat_id="", name=group_name, enabled=True)],
+                    keywords=list(keywords),
                     enabled=True,
                 ))
                 outcome["updated"] = False
+                outcome["group"] = group_name
 
         try:
             cfg = mutate_config(_apply)
@@ -1061,8 +1083,11 @@ class ToolExecutor:
             if regex_kws else ""
         )
         if outcome.get("updated"):
+            gname = outcome.get("group") or group_name
+            same = gname == group_name
             return (
-                f"✅ 已更新「{group_name}」的关键词预警\n"
+                f"✅ 已更新「{group_name}」的关键词预警"
+                f"{'' if same else f'（并入分组「{gname}」）'}\n"
                 f"新增 {outcome['added']} 个关键词，当前共 {outcome['count']} 个关键词"
                 f"{regex_note}"
             )

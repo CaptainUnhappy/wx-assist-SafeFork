@@ -132,7 +132,7 @@ class AlertEngine:
                 if err:
                     logger.warning(
                         "Alert: 跳过不可用的正则关键词（group=%s）: %s",
-                        ag.group_name or ag.chat_id, err,
+                        ag.name or ag.id, err,
                     )
                     continue
                 compiled[kw] = re.compile(regex_keyword_pattern(kw))
@@ -204,13 +204,21 @@ class AlertEngine:
             if not ag.enabled:
                 continue
 
-            # Group identity match
-            group_matched = False
-            if ag.chat_id and chat_id:
-                group_matched = ag.chat_id == chat_id
-            elif ag.group_name:
-                group_matched = ag.group_name.lower() == group_name.lower()
-            if not group_matched:
+            # 组内会话匹配：消息所属会话在组里、且该会话开关打开才算命中。
+            # 判据逐条沿用旧的单会话规则（有 chat_id 就比 id，否则比群名），
+            # 只是从"一条配置一个会话"变成"一个组多个会话"。
+            chat_matched = False
+            for c in ag.chats:
+                if not c.enabled:
+                    continue
+                if c.chat_id and chat_id:
+                    if c.chat_id == chat_id:
+                        chat_matched = True
+                        break
+                elif c.name and c.name.lower() == group_name.lower():
+                    chat_matched = True
+                    break
+            if not chat_matched:
                 continue
             if not ag.keywords:
                 continue

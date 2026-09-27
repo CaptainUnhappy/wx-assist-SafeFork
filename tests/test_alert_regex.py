@@ -21,6 +21,7 @@ import src.assistant.config as config_mod
 from src.assistant.alert import AlertEngine
 from src.assistant.config import (
     AssistantConfig,
+    AlertChat,
     AlertGroup,
     REGEX_KEYWORD_MAX_LEN,
     is_regex_keyword,
@@ -108,7 +109,8 @@ class _EngineCase(unittest.TestCase):
     def _engine(self, keywords, enabled=True):
         cfg = AssistantConfig(assistant_enabled=True)
         cfg.alert_groups = [AlertGroup(
-            chat_id="g@chatroom", group_name="测试群",
+            id="ag_001", name="测试群",
+            chats=[AlertChat(chat_id="g@chatroom", name="测试群", enabled=True)],
             keywords=list(keywords), enabled=enabled,
         )]
         outbox = MagicMock()
@@ -255,8 +257,10 @@ class TestRegexRuntimeSafety(_EngineCase):
         """热更新走同一条预编译路径，坏条目同样不能让它抛异常。"""
         engine, _ = self._engine(["派单"])
         cfg = AssistantConfig(assistant_enabled=True)
-        cfg.alert_groups = [AlertGroup(chat_id="g@chatroom", group_name="测试群",
-                                       keywords=[["/a/"], "/\\d+元/"])]
+        cfg.alert_groups = [AlertGroup(
+            id="ag_001", name="测试群",
+            chats=[AlertChat(chat_id="g@chatroom", name="测试群")],
+            keywords=[["/a/"], "/\\d+元/"])]
         engine.update_config(cfg)
         self.assertIn("/\\d+元/", engine._compiled)
 
@@ -274,8 +278,10 @@ class TestRegexRuntimeSafety(_EngineCase):
         engine, _ = self._engine(["派单"])
         self.assertEqual(engine._compiled, {})
         cfg = AssistantConfig(assistant_enabled=True)
-        cfg.alert_groups = [AlertGroup(chat_id="g@chatroom", group_name="测试群",
-                                       keywords=["/\\d+元/"])]
+        cfg.alert_groups = [AlertGroup(
+            id="ag_001", name="测试群",
+            chats=[AlertChat(chat_id="g@chatroom", name="测试群")],
+            keywords=["/\\d+元/"])]
         engine.update_config(cfg)
         self.assertIn("/\\d+元/", engine._compiled)
 
@@ -295,7 +301,9 @@ class TestRegexConfigRoundTrip(unittest.TestCase):
     def test_regex_keywords_survive_save_and_load(self):
         cfg = config_mod.load_assistant_config()
         cfg.alert_groups.append(config_mod.AlertGroup(
-            group_name="测试群", keywords=["派单", "/\\d{2,}元/", "/(?i)urgent/"],
+            id="ag_001", name="测试群",
+            chats=[config_mod.AlertChat(chat_id="g@chatroom", name="测试群")],
+            keywords=["派单", "/\\d{2,}元/", "/(?i)urgent/"],
         ))
         config_mod.save_assistant_config(cfg)
 
@@ -304,9 +312,10 @@ class TestRegexConfigRoundTrip(unittest.TestCase):
             reloaded.alert_groups[0].keywords,
             ["派单", "/\\d{2,}元/", "/(?i)urgent/"],
         )
+        self.assertEqual(reloaded.alert_groups[0].chats[0].chat_id, "g@chatroom")
 
     def test_legacy_literal_config_unchanged(self):
-        """老配置（纯字面）读出来与原样一致，无迁移副作用。"""
+        """老配置（一会话一条）无损迁移成单会话分组，关键词逐字保留。"""
         legacy = {
             "assistant_enabled": True,
             "alert_groups": [{
@@ -317,7 +326,12 @@ class TestRegexConfigRoundTrip(unittest.TestCase):
         config_mod.CONFIG_PATH.write_text(
             json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
         cfg = config_mod.load_assistant_config()
-        self.assertEqual(cfg.alert_groups[0].keywords, ["派单", "急"])
+        ag = cfg.alert_groups[0]
+        self.assertEqual(ag.keywords, ["派单", "急"])
+        self.assertEqual(ag.name, "抢单群A")
+        self.assertTrue(ag.id)
+        self.assertEqual([(c.chat_id, c.name, c.enabled) for c in ag.chats],
+                         [("a@chatroom", "抢单群A", True)])
 
 
 # ── Agent 工具 add_alert ──────────────────────────────────────────────
