@@ -380,7 +380,7 @@ class ServerStatusTests(unittest.TestCase):
         expected_fields = {
             "running", "uptime_sec", "messages_processed",
             "wechat_backend", "db_ok",
-            "wechat_online", "ai_ok", "ai_verified", "model_name", "group_count",
+            "wechat_online", "ai_ok", "ai_verified", "ai_error", "model_name", "group_count",
             "last_api_call_sec_ago", "last_api_call_time",
             "timestamp", "error", "avatar_url", "wx_name",
             "restricted_features_enabled",

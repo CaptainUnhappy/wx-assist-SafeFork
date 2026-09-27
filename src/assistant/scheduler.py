@@ -813,6 +813,8 @@ class DigestScheduler:
             )
             logger.info("[DIGEST] LLM ok for '%s' — len=%d preview=%s",
                         dg.name, len(text), text[:100].replace('\n', ' '))
+            from src.summarize.base import record_llm_success
+            record_llm_success()
             return text
         except LLMContextOverflowError as e:
             log_llm_interaction(
@@ -824,6 +826,7 @@ class DigestScheduler:
                 latency_ms=(time.monotonic() - llm_start) * 1000,
                 extra={**extra, "error": str(e), "prompt_tokens": e.prompt_tokens},
             )
+            # 上下文超限是内容问题，不是 AI 挂了；不写健康记录，避免面板假红。
             raise
         except Exception as e:
             log_llm_interaction(
@@ -836,6 +839,8 @@ class DigestScheduler:
                 extra={**extra, "error": str(e)},
             )
             logger.error("[DIGEST] LLM call failed for '%s': %s", dg.name, e)
+            from src.summarize.base import record_llm_failure
+            record_llm_failure(f"群摘要: {e}")
             if reraise:
                 raise
             return f"摘要生成失败: {e}"

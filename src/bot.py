@@ -15,6 +15,7 @@ from pathlib import Path
 from .config import BotConfig, PROJECT_ROOT
 from .db import initialize_db, MessageStore
 from .summarize import create_summarizer
+from .summarize.base import get_llm_health
 from .router import MessageRouter
 from .utils.logging_config import setup_logging
 from .utils.op_logger import op_log
@@ -153,12 +154,16 @@ class HealthMonitor:
             return False
 
     def _check_ai_ok(self) -> bool:
-        """Check if AI API has ever been called successfully."""
-        last = self._summarizer.last_api_call_time
-        if last <= 0:
-            return False  # never called
-        # Once connected successfully, stay ok until restart
-        return True  # ever called = ok
+        """Check if AI is usable, based on the most recent real API outcome.
+
+        以前这里是"成功调用过一次就一直 ok 到重启"，余额耗尽 / key 失效后
+        面板永远显示可达。健康记录是进程级共享的（OA 监视器、网页对话各自
+        新建 summarizer 实例也能写入），所以只取最近一次真实调用的结果。
+        """
+        health = get_llm_health()
+        if health["ts"] <= 0:
+            return False  # 从未调用过
+        return health["ok"]
 
     def _get_model_name(self) -> str:
         """Get the current AI model name."""

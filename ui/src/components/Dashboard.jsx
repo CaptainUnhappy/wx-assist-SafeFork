@@ -546,8 +546,9 @@ export default function Dashboard({ status, onTabChange }) {
               })}
             </span>
           } />
-          <StatusTile icon={Brain} label="AI 后端" ok={status.ai_ok} okText="可达" errText="未响应"
-            detail={status.ai_ok ? (status.model_name || '') : '未检测或未成功调用'} />
+          <StatusTile icon={Brain} label="AI 后端" ok={status.ai_ok} okText="可达"
+            errText={status.ai_error ? '不可用' : '未响应'}
+            detail={status.ai_ok ? (status.model_name || '') : (status.ai_error || '未检测或未成功调用')} />
           {(() => {
             // RAG state: distinguish 3 outcomes per spec
             // - no_rag build (rag_available=false) → 未安装

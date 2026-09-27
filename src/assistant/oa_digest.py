@@ -172,9 +172,13 @@ def call_llm(prompt: str, system_prompt: str = "", summarizer=None) -> str:
                 extra={"temperature": 0.3, "max_tokens": 4096},
             )
             logger.debug("[OA-DIGEST] LLM response: %d chars, preview=%s", len(content), content[:100])
+            from src.summarize.base import record_llm_success
+            record_llm_success()
             return content
         except Exception as e:
             logger.error("LLM call via summarizer failed: %s, falling back to raw requests", e)
+            from src.summarize.base import record_llm_failure
+            record_llm_failure(f"公众号摘要: {e}")
             # Fall through to raw requests fallback
 
     # Legacy fallback: raw requests.post (for when no summarizer is available)

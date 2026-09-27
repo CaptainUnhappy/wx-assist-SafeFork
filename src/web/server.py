@@ -580,7 +580,7 @@ class _ServerStatus:
     _FIELDS = (
         "running", "uptime_sec", "messages_processed",
         "wechat_backend", "db_ok",
-        "wechat_online", "ai_ok", "ai_verified", "model_name", "group_count",
+        "wechat_online", "ai_ok", "ai_verified", "ai_error", "model_name", "group_count",
         "last_api_call_sec_ago", "last_api_call_time",
         "timestamp", "error", "avatar_url", "wx_name",
         "restricted_features_enabled", "rag_available", "rag_enabled", "rag_ok", "mcp_servers", "im_channels",
@@ -598,6 +598,7 @@ class _ServerStatus:
         self.wechat_online = False
         self.ai_ok = False
         self.ai_verified = False
+        self.ai_error = ""
         self.model_name = ""
         self.group_count = 0
         self.last_api_call_sec_ago = -1
@@ -619,18 +620,27 @@ class _ServerStatus:
         """Update status fields and broadcast to all WebSocket clients."""
         with self._lock:
             for k, v in kwargs.items():
-                if hasattr(self, k):
+                if hasattr(self, k) and k not in ("ai_ok", "ai_error"):
                     setattr(self, k, v)
-            # Merge ai_ok: verified via config detection OR successful AI call OR bot reports ok
-            if 'ai_verified' in kwargs or 'last_api_call_time' in kwargs or 'ai_ok' in kwargs:
-                self.ai_ok = self.ai_verified or (self.last_api_call_time > 0) or kwargs.get('ai_ok', False)
+            # ai_ok 由最近一次真实调用决定，不接受调用方直接赋值
+            self.ai_ok, self.ai_error = self._ai_state()
             self.timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
         # Snapshot lock-free: all fields are atomic types under GIL
         self._broadcast(self.snapshot())
 
+    def _ai_state(self) -> tuple[bool, str]:
+        """AI 可用性判定：有真实调用就以最近一次结果为准，否则用配置检测兜底。"""
+        from src.summarize.base import get_llm_health
+        health = get_llm_health()
+        if health["ts"] <= 0:
+            return self.ai_verified, ""
+        return health["ok"], ("" if health["ok"] else health["msg"])
+
     def snapshot(self):
         """Return a dict snapshot (lock-free, GIL-safe for atomic types)."""
         snapshot = {k: getattr(self, k) for k in self._FIELDS}
+        # 面板实时反映最近一次调用结果，不等 30s 心跳
+        snapshot["ai_ok"], snapshot["ai_error"] = self._ai_state()
         try:
             snapshot["im_channels"] = _im_channel_snapshot()
         except Exception:
@@ -2219,7 +2229,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 })
             except Exception as e:
                 logger.exception("Failed to run sandbox test")
-                update_status(ai_ok=False, ai_verified=False)
+                # 不写健康记录：这里的 except 覆盖配置读取、summarizer 构造、
+                # send_json 等非 AI 可用性的异常，写进去会让面板假红。真正的
+                # LLM 失败已由 summarizer.chat() 内部的重试层登记。
+                update_status()
                 self.send_json({
                     "ok": False,
                     "error": str(e),
@@ -4273,7 +4286,9 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     return
             except Exception as e:
                 logger.error(f"AI Chat API error: {e}")
-                update_status(ai_ok=False, ai_verified=False)
+                # 同上：这个 except 覆盖 start/history/destroy 等会话与数据库
+                # 操作，异常不等于 AI 不可用，写健康记录会造成面板假红。
+                update_status()
                 self.send_json({"ok": False, "error": str(e)})
                 return
 

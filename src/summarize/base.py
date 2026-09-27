@@ -4,6 +4,7 @@ Implementations: ClaudeSummarizer, OpenAICompatSummarizer.
 """
 
 import logging
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Iterator, TypeVar
@@ -13,6 +14,32 @@ from ..utils.llm_logger import log_llm_interaction, mask_secrets
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# ── LLM 健康记录（进程级，跨 summarizer 实例共享）────────────────────
+# OA 监视器和网页对话每次都新建 summarizer，健康状态若记在实例上，
+# HealthMonitor 手里那个实例永远看不到它们的失败。
+# 单事件模型：只保留最近一次真实调用的结果，比较时间戳会被 Windows
+# 的 ~15ms 时钟精度打平，出现成功与失败同帧分不清先后的情况。
+_llm_health: dict[str, Any] = {"ok": False, "ts": 0.0, "msg": ""}
+_llm_health_lock = threading.Lock()
+
+
+def get_llm_health() -> dict[str, Any]:
+    """返回最近一次真实 LLM 调用的结果：{ok, ts, msg}，``ts`` 为 0 表示从未调用。"""
+    with _llm_health_lock:
+        return dict(_llm_health)
+
+
+def record_llm_failure(reason: str) -> None:
+    """登记一次 LLM 调用失败（供未经重试包装的流式/超时路径调用）。"""
+    with _llm_health_lock:
+        _llm_health.update({"ok": False, "ts": time.time(), "msg": str(reason)[:200]})
+
+
+def record_llm_success() -> None:
+    """登记一次 LLM 调用成功（流式路径首个 token 到达即视为可用）。"""
+    with _llm_health_lock:
+        _llm_health.update({"ok": True, "ts": time.time(), "msg": ""})
 
 # 失败交互日志里错误串的长度上限 —— 中转网关偶尔会把整个请求体回显进错误信息。
 _ERROR_CLIP_CHARS = 600
@@ -384,13 +411,18 @@ class AbstractSummarizer(ABC):
             The return value of call_fn().
 
         Raises:
-            RuntimeError: If all retries are exhausted.
+            RuntimeError: If all retries are exhausted.  耗尽时会把失败写入
+                进程级健康记录（见 ``record_llm_failure``），让 AI 状态面板
+                能从"曾经成功过"翻回不可用。
         """
         last_error: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
                 result = call_fn()
-                self.last_api_call_time = time.time()
+                now = time.time()
+                self.last_api_call_time = now
+                with _llm_health_lock:
+                    _llm_health.update({"ok": True, "ts": now, "msg": ""})
                 return result
             except self.retry_exceptions as e:
                 wait = 2 ** attempt
@@ -402,6 +434,7 @@ class AbstractSummarizer(ABC):
                 time.sleep(wait)
                 last_error = e
 
+        record_llm_failure(f"{label}: {last_error}")
         error = RuntimeError(
             f"Failed after {self.max_retries} retries on '{label}': "
             f"{last_error}"

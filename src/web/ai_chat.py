@@ -33,6 +33,18 @@ from ..utils.op_logger import op_log, op_log_error
 
 logger = logging.getLogger(__name__)
 
+
+def _mark_stream_success(summarizer) -> None:
+    """流式调用收到首个 token 即视为 AI 可达。
+
+    Stub 后端（未配置 AI）的"首个 token"是写死的"AI 未配置…"提示语，
+    把它登记成成功会让面板假绿，所以跳过。
+    """
+    if getattr(summarizer, "_backend_name", "") == "stub":
+        return
+    from ..summarize.base import record_llm_success
+    record_llm_success()
+
 # ── Safety limits for context building ────────────────────────────
 # Prevent OOM crash when processing groups with huge message history.
 # Chinese text ≈ 1.5 chars/token; 200K chars ≈ 133K tokens — well
@@ -899,6 +911,10 @@ def handle_ai_chat_message_stream(body: dict, wfile) -> None:
     _send_sse_headers(wfile)
 
     # ── Stream response ─────────────────────────────────────────
+    # 流式路径不经过 _retry_with_backoff，成功/失败要自己写进健康记录，
+    # 否则面板的 AI 状态不会随网页对话的结果变化。
+    from src.summarize.base import record_llm_failure
+    from src.web.server import update_status
     FIRST_TOKEN_TIMEOUT_SEC = 40
     full_response = []
     stream_start = time.monotonic()
@@ -911,12 +927,10 @@ def handle_ai_chat_message_stream(body: dict, wfile) -> None:
                 if elapsed > FIRST_TOKEN_TIMEOUT_SEC:
                     logger.warning(f"AI chat stream: first token took {elapsed:.1f}s (> {FIRST_TOKEN_TIMEOUT_SEC}s)")
                     _send_sse_event(wfile, "error", {"message": "⚠️ AI 响应超时，请重试"})
-                    try:
-                        from src.web.server import _status
-                        _status.update_status(ai_ok=False, ai_verified=False)
-                    except Exception:
-                        pass
+                    record_llm_failure(f"AI chat: 首 token 超时 {elapsed:.0f}s")
+                    update_status()
                     return
+                _mark_stream_success(summarizer)
             _send_sse_event(wfile, "token", {"content": token})
             full_response.append(token)
     except BrokenPipeError:
@@ -928,6 +942,8 @@ def handle_ai_chat_message_stream(body: dict, wfile) -> None:
         return
     except Exception as e:
         logger.error("AI chat stream error: %s", e)
+        record_llm_failure(f"AI chat: {e}")
+        update_status()
         try:
             _send_sse_event(wfile, "error", {"message": f"AI 服务错误: {e}"})
         except (BrokenPipeError, ConnectionResetError):
@@ -1174,6 +1190,8 @@ def handle_sns_ai_summarize_stream(body: dict, wfile) -> None:
     user_message = f"请总结以下朋友圈内容：\n\n{context_text}"
 
     # Stream response
+    from src.summarize.base import record_llm_failure
+    from src.web.server import update_status
     FIRST_TOKEN_TIMEOUT_SEC = 40
     _send_sse_headers(wfile)
     full_response = []
@@ -1197,13 +1215,11 @@ def handle_sns_ai_summarize_stream(body: dict, wfile) -> None:
                 if elapsed > FIRST_TOKEN_TIMEOUT_SEC:
                     logger.warning(f"SNS AI summarize: first token took {elapsed:.1f}s (> {FIRST_TOKEN_TIMEOUT_SEC}s)")
                     _send_sse_event(wfile, "error", {"message": "⚠️ AI 响应超时，请重试"})
-                    try:
-                        from src.web.server import _status
-                        _status.update_status(ai_ok=False, ai_verified=False)
-                    except Exception:
-                        pass
+                    record_llm_failure(f"SNS 摘要: 首 token 超时 {elapsed:.0f}s")
+                    update_status()
                     _fail_task("AI 首 token 超时")
                     return
+                _mark_stream_success(summarizer)
             _send_sse_event(wfile, "token", {"content": token})
             full_response.append(token)
     except BrokenPipeError:
@@ -1217,6 +1233,8 @@ def handle_sns_ai_summarize_stream(body: dict, wfile) -> None:
     except Exception as e:
         logger.error("SNS AI summarize stream error: %s", e)
         _fail_task(f"AI 服务错误: {e}")
+        record_llm_failure(f"SNS 摘要: {e}")
+        update_status()
         try:
             _send_sse_event(wfile, "error", {"message": f"AI 服务错误: {e}"})
         except (BrokenPipeError, ConnectionResetError):

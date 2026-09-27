@@ -77,6 +77,23 @@ Provider 检测会区分：
 
 AI 调用失败时，摘要任务会进入失败状态；不会把错误当成“没有新内容”。
 
+### 5.1 LLM 健康记录与面板 AI 状态
+
+`src/summarize/base.py` 维护一份**进程级单事件**健康记录 `_llm_health = {ok, ts, msg}`，只保留最近一次真实调用的结果：
+
+- `_retry_with_backoff` 成功即写 `ok=True`；重试全部耗尽写 `ok=False` 与原因（截断到 200 字符）。覆盖 `chat()`、`agent_chat()`、`consolidate_memory()`；
+- 群摘要 `_call_digest_api`（`scheduler.py`）和公众号长文摘要 `_call_long_api`（`oa_digest.py`）直接调后端 API，由调用点自行登记：成功记 success，非上下文超限异常记 failure（上下文超限是内容问题不是 AI 挂了，不写记录避免假红）；
+- 流式对话（`/api/ai/chat/message`、朋友圈 AI 总结）不经过重试包装，由调用点自行登记：首个 token 到达算成功（Stub 后端除外，见下），异常或首 token 超时算失败；
+- 记录必须是模块级而非实例属性：OA 即时提醒和网页对话每次都新建 summarizer，记在实例上调用方互相看不到。
+
+**只登记真实 LLM 调用结果**：`/api/sandbox/test` 与 `/api/assistant/ai/*` 的外层 `except` 还覆盖配置读取、会话/数据库操作、`send_json` 等与 AI 可用性无关的异常，写进健康记录会造成面板假红，因此那些分支只刷新广播、不写记录（其内部真正的 `chat()` 失败已由重试层登记）。同理，Stub 后端流式返回的"AI 未配置…"提示语不算成功。
+
+消费方：首页面板 `_ServerStatus`（`src/web/server.py`）与 bot 侧 `HealthMonitor._check_ai_ok()`（`src/bot.py`）读同一份记录。`ts == 0`（从未发生过真实调用）时才回退到配置检测结论 `ai_verified`；一旦出现调用结果就以结果为准。`_ServerStatus.update()` 忽略调用方传入的 `ai_ok` / `ai_error`，因此 bot 30 秒心跳不会把红色状态顶回绿色。面板文案：可达 / 不可用（附最近一次失败原因）/ 未响应。
+
+未纳入登记的调用：无（所有 LLM 路径均已覆盖）。
+
+回归用例：`tests/test_llm_health.py`（14 条，含"心跳不得复活面板"和"Stub 流式不算可达"）。
+
 ## 6. SSE 对话
 
 ```text

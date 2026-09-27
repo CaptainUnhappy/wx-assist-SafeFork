@@ -215,6 +215,7 @@ export default function App() {
     wechat_online: false,
     ai_ok: false,
     ai_verified: false,
+    ai_error: '',
     model_name: '',
     group_count: 0,
     last_api_call_sec_ago: -1,
