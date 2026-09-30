@@ -16,6 +16,7 @@ import ChatTab from './components/ChatTab'
 import FeatureGuide from './components/FeatureGuide'
 import TaskCenter from './components/TaskCenter'
 import LANCard from './components/LANCard'
+import CloseConfirmDialog from './components/CloseConfirmDialog'
 import { AmbientWaveBackground } from './components/AmbientBackground'
 
 const iconVariants = {
@@ -30,6 +31,7 @@ const TABS = [
       { id: 'ai', label: 'AI 后端配置' },
       { id: 'data', label: '数据配置' },
       { id: 'push', label: '消息推送' },
+      { id: 'general', label: '通用' },
     ],
   },
   { id: 'assistant', label: '群聊助手', icon: ChatCircleDots },
@@ -60,6 +62,8 @@ export default function App() {
   const [wsConnected, setWsConnected] = useState(false)
   const [showTaskCenter, setShowTaskCenter] = useState(false)
   const [showLAN, setShowLAN] = useState(false)
+  // /api/update/check 的结果：通用分区和侧边栏红点共用这一份，避免各自重复请求
+  const [updateInfo, setUpdateInfo] = useState(null)
   const [runningTaskCount, setRunningTaskCount] = useState(0)
   const [failedTaskCount, setFailedTaskCount] = useState(0)
   // lastReadTime: 上次打开任务中心的时间，用于计算"未读失败任务"数
@@ -144,6 +148,15 @@ export default function App() {
         const d = await statusRes.json()
         const config = await configRes.json()
         setOnboardingDone(d.onboarding_done)
+
+        // 启动时自动检查更新（可在「系统配置 › 通用」里关掉）。
+        // 不带 force，让后端 30 分钟缓存生效，避免浪费 GitHub 的访问额度。
+        if (config.config?.auto_check_update !== false) {
+          fetch(`${API_BASE}/api/update/check`)
+            .then(r => r.json())
+            .then(data => { if (data.ok) setUpdateInfo(data) })
+            .catch(() => {})
+        }
 
         // Auto-start bot if onboarding done AND WECHAT_DATA_DIR + WCDB_KEY both have values
         if (d.onboarding_done) {
@@ -313,6 +326,13 @@ export default function App() {
                       <Icon weight={activeTab === id ? 'fill' : 'regular'} size={18} className={activeTab === id ? 'text-brand-green-hover dark:text-brand-green' : 'text-text-muted'} />
                     </motion.div>
                     <span className="z-10">{label}</span>
+                    {/* 有新版本时挂在「系统配置」上 —— 通用分区在它下面 */}
+                    {id === 'config' && updateInfo?.has_update ? (
+                      <span
+                        className="ml-auto z-10 w-2 h-2 rounded-full bg-[#d45656] shrink-0"
+                        title={`有新版本 v${updateInfo.latest_version} 可用`}
+                      />
+                    ) : null}
                   </motion.button>
                   {/* Sub-nav (config + scheduler): animates height and opacity on toggle */}
                   {subs && (
@@ -519,7 +539,14 @@ export default function App() {
                 className="p-4 lg:p-8"
               >
                 {activeTab === 'dashboard' && <Dashboard status={status} onTabChange={setActiveTab} />}
-                {activeTab === 'config' && <ConfigPanel activeSection={configSection} onNavigate={setConfigSection} />}
+                {activeTab === 'config' && (
+                  <ConfigPanel
+                    activeSection={configSection}
+                    onNavigate={setConfigSection}
+                    updateInfo={updateInfo}
+                    onCheckUpdate={setUpdateInfo}
+                  />
+                )}
                 {activeTab === 'assistant' && <AssistantPanel />}
                 {activeTab === 'chats' && <ChatTab />}
                 {activeTab === 'favorites' && <FavoritesTab />}
@@ -536,6 +563,9 @@ export default function App() {
 
       {/* Task Center Drawer */}
       <TaskCenter open={showTaskCenter} onClose={() => setShowTaskCenter(false)} />
+
+      {/* 关窗确认弹窗：由 desktop.py 通过 evaluate_js 唤起 */}
+      <CloseConfirmDialog />
 
       {/* LAN Modal */}
       <AnimatePresence>

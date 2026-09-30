@@ -1,6 +1,6 @@
 ﻿import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle, Warning, FloppyDisk, Info, CircleNotch, MagnifyingGlass, Lightning, PaperPlaneTilt, QrCode, SignOut, TestTube, ChatCircle, Trash, CaretDown, CaretRight, X, Brain } from '@phosphor-icons/react'
+import { CheckCircle, Warning, FloppyDisk, Info, CircleNotch, MagnifyingGlass, Lightning, PaperPlaneTilt, QrCode, SignOut, TestTube, ChatCircle, Trash, CaretDown, CaretRight, X, Brain, ArrowsClockwise, DownloadSimple, Rocket, ArrowSquareOut } from '@phosphor-icons/react'
 import { QRCodeSVG } from 'qrcode.react'
 import { spring, Field, Toggle, Select, Input, API_BASE, getWsUrl } from './SharedComponents'
 import ChatDrawer from './ChatDrawer'
@@ -426,8 +426,449 @@ function RagToggleRow({ form, update }) {
   )
 }
 
-const sectionTitles = { ai: 'AI 后端配置', identity: '聊天范围', data: '数据配置', push: '消息推送', sandbox: 'AI 调试台' }
-const sectionAccents = { ai: 'var(--brand-green)', identity: 'var(--status-info)', data: 'var(--brand-green)', push: 'var(--brand-green)', sandbox: 'var(--color-purple-500, #8b5cf6)' }
+// ── General Section（通用：版本与更新 + 窗口行为）──────────────────────
+// 「版本与更新」是纯展示 + 即时操作（点了就跑），「通用设置」需要保存 ——
+// 所以这里自带保存按钮，不复用底部那个全局保存：全局保存会把 AI 配置
+// 整份重写一遍，还会弹出"需要重启机器人才能生效"，对这两项是误导
+// （它们改完立即生效）。push 分区同样是自己管、隐藏底部按钮。
+
+const CLOSE_OPTIONS = [
+  { value: 'ask', label: '每次询问我', desc: '点关闭按钮时弹窗，每次自己选' },
+  { value: 'tray', label: '最小化到托盘，程序继续在后台运行', desc: '关键词提醒、定时任务、群摘要照常执行；双击托盘图标可恢复窗口' },
+  { value: 'quit', label: '直接退出程序', desc: '完全关闭，所有后台任务停止' },
+]
+
+function formatBytes(bytes) {
+  if (!bytes) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatDate(iso) {
+  if (!iso) return ''
+  try {
+    return new Date(iso).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+  } catch {
+    return ''
+  }
+}
+
+// 后端把 Release 正文解析成了结构化块，这里直接用 React 元素渲染 ——
+// 不引入 markdown 依赖，也不用 innerHTML，没有 XSS 面。
+function ReleaseNotes({ blocks }) {
+  if (!blocks || !blocks.length) return null
+  return (
+    <div className="space-y-1">
+      {blocks.map((block, index) => {
+        const key = `${block.type}-${index}`
+        if (block.type === 'hr') {
+          return <hr key={key} className="border-border-main my-2.5" />
+        }
+        if (['h1', 'h2', 'h3', 'h4'].includes(block.type)) {
+          return (
+            <p key={key} className="text-[13px] font-semibold text-text-main mt-3 first:mt-0">
+              {block.text}
+            </p>
+          )
+        }
+        if (block.type === 'li') {
+          return (
+            <div key={key} className={`flex gap-2 text-[13px] text-text-muted leading-relaxed ${block.indent ? 'pl-4' : ''}`}>
+              <span className="w-1 h-1 rounded-full bg-brand-green shrink-0 mt-[8px]" />
+              <span>{block.text}</span>
+            </div>
+          )
+        }
+        if (block.type === 'code') {
+          return (
+            <pre key={key} className="text-[12px] bg-bg-raised border border-border-main rounded-lg p-3 overflow-x-auto font-mono text-text-main whitespace-pre-wrap">
+              {block.text}
+            </pre>
+          )
+        }
+        if (block.type === 'quote') {
+          return (
+            <p key={key} className="text-[13px] text-text-muted border-l-2 border-border-main pl-3 leading-relaxed">
+              {block.text}
+            </p>
+          )
+        }
+        return (
+          <p key={key} className="text-[13px] text-text-muted leading-relaxed">
+            {block.text}
+          </p>
+        )
+      })}
+    </div>
+  )
+}
+
+function GeneralSection({ form, update, updateInfo, onCheckUpdate }) {
+  const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const [checking, setChecking] = useState(false)
+  const [checkError, setCheckError] = useState('')
+  const [download, setDownload] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
+
+  const pollRef = useRef(null)
+
+  // 离开页面时停掉进度轮询
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
+
+  function startProgressPolling() {
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/update/progress`)
+        const data = await res.json()
+        if (!data.ok) return
+        setDownload(data.state)
+        if (data.state.state !== 'downloading' && pollRef.current) {
+          clearInterval(pollRef.current)
+          pollRef.current = null
+        }
+      } catch {}
+    }, 500)
+  }
+
+  async function handleCheck() {
+    setChecking(true)
+    setCheckError('')
+    try {
+      const res = await fetch(`${API_BASE}/api/update/check?force=1`)
+      const data = await res.json()
+      if (data.ok) {
+        onCheckUpdate?.(data)
+      } else {
+        setCheckError(data.error || '检查更新失败')
+      }
+    } catch {
+      setCheckError('无法连接到服务器')
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  async function handleDownload() {
+    setBusy(true)
+    setNotice('')
+    try {
+      const res = await fetch(`${API_BASE}/api/update/download`, { method: 'POST' })
+      const data = await res.json()
+      if (data.ok) {
+        setDownload(data.state)
+        startProgressPolling()
+      } else {
+        setNotice(data.error || '开始下载失败')
+      }
+    } catch {
+      setNotice('无法连接到服务器')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleCancel() {
+    try {
+      await fetch(`${API_BASE}/api/update/cancel`, { method: 'POST' })
+      setNotice('已取消下载')
+    } catch {}
+  }
+
+  async function handleInstall() {
+    setBusy(true)
+    setNotice('')
+    try {
+      const res = await fetch(`${API_BASE}/api/update/install`, { method: 'POST' })
+      const data = await res.json()
+      if (data.ok) {
+        setNotice('正在更新，程序马上会自动重启…')
+      } else {
+        setNotice(data.error || '更新失败')
+        if (data.fallback_url) window.open(data.fallback_url, '_blank')
+      }
+    } catch {
+      setNotice('无法连接到服务器')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleSkip() {
+    if (!updateInfo?.latest_version) return
+    try {
+      await fetch(`${API_BASE}/api/update/skip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version: updateInfo.latest_version }),
+      })
+      setNotice(`已忽略 v${updateInfo.latest_version}，出现更新的版本时会再提示`)
+    } catch {
+      setNotice('操作失败')
+    }
+  }
+
+  async function handleSaveGeneral() {
+    setSaving(true)
+    setSaved(false)
+    setSaveError('')
+    try {
+      const res = await fetch(`${API_BASE}/api/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          close_action: form.close_action || 'ask',
+          auto_check_update: Boolean(form.auto_check_update),
+        }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setSaved(true)
+        setTimeout(() => setSaved(false), 3000)
+      } else {
+        setSaveError(data.error || '保存失败')
+      }
+    } catch {
+      setSaveError('无法连接到服务器')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const info = updateInfo
+  const hasUpdate = Boolean(info?.has_update)
+  const dl = download || {}
+  const downloading = dl.state === 'downloading'
+  const downloaded = dl.state === 'done'
+  const percent = dl.total ? Math.min(100, Math.round((dl.received / dl.total) * 100)) : 0
+
+  const ghostBtn = 'px-4 py-2 rounded-full text-[13px] font-medium border border-border-main text-text-main hover:bg-bg-raised transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed'
+
+  return (
+    <div className="space-y-4">
+      {/* ── 版本与更新 ── */}
+      <div className="border border-border-main rounded-2xl p-6">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <p className="text-[15px] font-semibold text-text-main">摘星 · 微信助手</p>
+            <p className="text-[13px] text-text-muted mt-1">
+              当前版本 v{info?.current_version || '—'}
+              {info ? (info.build_variant === 'lite' ? ' · 精简版' : ' · 完整版') : ''}
+            </p>
+            {info?.checked_at ? (
+              <p className="text-xs text-text-muted/80 mt-0.5">
+                上次检查：{new Date(info.checked_at * 1000).toLocaleString('zh-CN')}
+                {info.source === 'atom' ? '（订阅源）' : ''}
+              </p>
+            ) : null}
+          </div>
+          <button
+            onClick={handleCheck}
+            disabled={checking}
+            className={ghostBtn}
+          >
+            <span className="inline-flex items-center gap-1.5">
+              <ArrowsClockwise size={15} className={checking ? 'animate-spin' : ''} />
+              {checking ? '检查中…' : '检查更新'}
+            </span>
+          </button>
+        </div>
+
+        {checkError ? (
+          <p className="text-xs text-status-error mt-3">{checkError}</p>
+        ) : null}
+
+        {/* 发现新版本 */}
+        {hasUpdate && !downloading && !downloaded ? (
+          <div className="mt-5 pt-5 border-t border-border-main">
+            <div className="flex items-center gap-2 mb-3 flex-wrap">
+              <span className="w-2 h-2 rounded-full bg-brand-green" />
+              <p className="text-[14px] font-semibold text-text-main">发现新版本 v{info.latest_version}</p>
+              <span className="ml-auto text-xs text-text-muted">{formatDate(info.published_at)} 发布</span>
+            </div>
+
+            <div className="max-h-[320px] overflow-y-auto pr-1">
+              <ReleaseNotes blocks={info.notes} />
+            </div>
+
+            <div className="flex items-center gap-2 mt-4 flex-wrap">
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={handleDownload}
+                disabled={busy || !info.can_auto_install}
+                className="px-5 py-2 rounded-full bg-brand-green-hover text-white text-[13px] font-semibold hover:bg-[#0d8c5c] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+              >
+                <DownloadSimple size={15} />
+                {info.asset?.size ? `下载并更新（${formatBytes(info.asset.size)}）` : '下载并更新'}
+              </motion.button>
+              <button onClick={() => window.open(info.html_url, '_blank')} className={ghostBtn}>
+                <span className="inline-flex items-center gap-1.5">
+                  <ArrowSquareOut size={14} />查看 GitHub
+                </span>
+              </button>
+              <button onClick={handleSkip} className={ghostBtn}>忽略此版本</button>
+            </div>
+
+            {!info.can_auto_install ? (
+              <p className="text-xs text-status-warn mt-3 flex items-start gap-1.5">
+                <Info size={13} className="mt-0.5 shrink-0" />
+                <span>{info.install_blocked_reason}，可点「查看 GitHub」手动下载。</span>
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* 下载中 */}
+        {downloading ? (
+          <div className="mt-5 pt-5 border-t border-border-main">
+            <p className="text-[13px] font-medium text-text-main mb-3">正在下载 {dl.asset_name}</p>
+            <div className="h-2 rounded-full bg-bg-raised overflow-hidden">
+              <motion.div
+                className="h-full bg-brand-green rounded-full"
+                animate={{ width: `${dl.total ? percent : 100}%` }}
+                transition={{ duration: 0.3 }}
+              />
+            </div>
+            <div className="flex items-center gap-3 mt-2 text-xs text-text-muted">
+              <span className="font-mono tabular-nums">
+                {dl.total ? `${percent}%  ${formatBytes(dl.received)} / ${formatBytes(dl.total)}` : `已下载 ${formatBytes(dl.received)}`}
+              </span>
+              {dl.speed ? <span className="font-mono tabular-nums">{formatBytes(dl.speed)}/s</span> : null}
+              <button onClick={handleCancel} className="ml-auto text-status-error hover:underline cursor-pointer">取消</button>
+            </div>
+          </div>
+        ) : null}
+
+        {/* 下载完成 */}
+        {downloaded ? (
+          <div className="mt-5 pt-5 border-t border-border-main">
+            <div className="flex items-center gap-2 flex-wrap">
+              <CheckCircle size={16} weight="fill" className="text-brand-green" />
+              <p className="text-[13px] font-medium text-text-main">下载完成，可以更新了</p>
+            </div>
+            <div className="mt-3">
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={handleInstall}
+                disabled={busy}
+                className="px-5 py-2 rounded-full bg-brand-green-hover text-white text-[13px] font-semibold hover:bg-[#0d8c5c] transition-colors cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5"
+              >
+                <Rocket size={15} />立即更新并重启
+              </motion.button>
+            </div>
+            <p className="text-xs text-text-muted mt-3 leading-relaxed">
+              程序会自动退出 → 替换程序文件 → 重新启动。聊天记录、配置、语义索引都不会丢。
+            </p>
+          </div>
+        ) : null}
+
+        {/* 已是最新（或已忽略） */}
+        {info && !hasUpdate && !downloading && !downloaded ? (
+          <div className="mt-5 pt-5 border-t border-border-main">
+            <div className="flex items-center gap-2">
+              <CheckCircle size={16} weight="fill" className="text-brand-green" />
+              <p className="text-[13px] font-medium text-text-main">
+                {info.skipped ? `已忽略 v${info.skipped_version}` : '已是最新版本'}
+              </p>
+            </div>
+            {info.notes?.length ? (
+              <>
+                <p className="text-xs text-text-muted mt-3 mb-2">
+                  {info.skipped ? `v${info.latest_version} 更新内容` : `v${info.latest_version} 更新内容（你正在用的版本）`}
+                </p>
+                <div className="max-h-[280px] overflow-y-auto pr-1">
+                  <ReleaseNotes blocks={info.notes} />
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
+        {dl.state === 'error' && dl.error ? (
+          <p className="text-xs text-status-error mt-3">下载失败：{dl.error}</p>
+        ) : null}
+        {notice ? <p className="text-xs text-status-info mt-3">{notice}</p> : null}
+      </div>
+
+      {/* ── 通用设置（需要保存）── */}
+      <div className="border border-border-main rounded-2xl p-6">
+        <p className="text-[15px] font-semibold text-text-main">关闭窗口时</p>
+        <p className="text-xs text-text-muted mt-1 mb-4">
+          这一项保存后立即生效，不需要重启机器人
+        </p>
+
+        <div className="space-y-2">
+          {CLOSE_OPTIONS.map(option => {
+            const active = (form.close_action || 'ask') === option.value
+            return (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => update('close_action', option.value)}
+                className={`w-full text-left px-4 py-3 rounded-xl border transition-all cursor-pointer ${
+                  active
+                    ? 'border-brand-green/40 bg-brand-green-light'
+                    : 'border-border-main hover:border-text-muted/30 dark:hover:border-text-muted/40'
+                }`}
+              >
+                <span className="flex items-start gap-2.5">
+                  <span
+                    className={`mt-[3px] w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center transition-colors ${
+                      active ? 'border-brand-green' : 'border-text-muted/50'
+                    }`}
+                  >
+                    {active ? <span className="w-2 h-2 rounded-full bg-brand-green" /> : null}
+                  </span>
+                  <span>
+                    <span className={`block text-[14px] font-medium ${active ? 'text-brand-green-hover dark:text-brand-green' : 'text-text-main'}`}>
+                      {option.label}
+                    </span>
+                    <span className="block text-xs text-text-muted mt-0.5">{option.desc}</span>
+                  </span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="mt-6 pt-5 border-t border-border-main flex items-center justify-between gap-4">
+          <div>
+            <p className="text-[14px] font-medium text-text-main">启动时自动检查更新</p>
+            <p className="text-xs text-text-muted mt-0.5">只提示新版本，不会自动下载</p>
+          </div>
+          <Toggle
+            enabled={Boolean(form.auto_check_update)}
+            onChange={v => update('auto_check_update', v)}
+            title="启动时自动检查更新"
+          />
+        </div>
+
+        <div className="mt-6 flex items-center gap-3 flex-wrap">
+          <motion.button
+            whileTap={{ scale: 0.97 }}
+            onClick={handleSaveGeneral}
+            disabled={saving}
+            className="w-32 py-2.5 rounded-full text-[14px] font-semibold tracking-wide shadow-sm transition-all duration-300 flex items-center justify-center gap-2 cursor-pointer bg-brand-green-hover text-white hover:bg-[#0d8c5c] disabled:opacity-60"
+          >
+            {saved
+              ? <><CheckCircle size={17} weight="fill" />已保存</>
+              : <><FloppyDisk size={17} />保存</>}
+          </motion.button>
+          {saved ? <span className="text-xs text-brand-green-hover dark:text-brand-green">已保存，立即生效</span> : null}
+          {saveError ? <span className="text-xs text-status-error">{saveError}</span> : null}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const sectionTitles = { ai: 'AI 后端配置', identity: '聊天范围', data: '数据配置', push: '消息推送', general: '通用', sandbox: 'AI 调试台' }
+const sectionAccents = { ai: 'var(--brand-green)', identity: 'var(--status-info)', data: 'var(--brand-green)', push: 'var(--brand-green)', general: 'var(--status-info)', sandbox: 'var(--color-purple-500, #8b5cf6)' }
 
 // ── Credentials Section (连接凭证配置) ─────────────────────────────────
 
@@ -2240,7 +2681,7 @@ function PushPlatformView() {
   )
 }
 
-export default function ConfigPanel({ activeSection, onNavigate }) {
+export default function ConfigPanel({ activeSection, onNavigate, updateInfo, onCheckUpdate }) {
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [loaded, setLoaded] = useState(false)
@@ -2296,6 +2737,8 @@ export default function ConfigPanel({ activeSection, onNavigate }) {
     wechat_backend: 'wcdb', wechat_groups: '*',
     wechat_data_dir: '',
     wxid: '', db_path: '', has_key: false, key_preview: '', wcdb_key: '',
+    // 通用分区（改完立即生效，不需要重启机器人）
+    close_action: 'ask', auto_check_update: true,
   })
 
   // Detected default data dir (auto-detected, shown as placeholder)
@@ -2412,13 +2855,21 @@ export default function ConfigPanel({ activeSection, onNavigate }) {
                   </div>
                 )}
                 {activeSection === 'push' && <PushPlatformView />}
+                {activeSection === 'general' && (
+                  <GeneralSection
+                    form={form}
+                    update={update}
+                    updateInfo={updateInfo}
+                    onCheckUpdate={onCheckUpdate}
+                  />
+                )}
               </div>
             </div>
           </motion.div>
         </AnimatePresence>
       </div>
 
-      {activeSection !== 'push' && (
+      {activeSection !== 'push' && activeSection !== 'general' && (
         <>
           <div className="mt-8 flex flex-col sm:flex-row items-center gap-4">
             <motion.button

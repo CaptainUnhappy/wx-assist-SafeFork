@@ -645,6 +645,12 @@ class _ServerStatus:
             snapshot["im_channels"] = _im_channel_snapshot()
         except Exception:
             snapshot["im_channels"] = {}
+        # 版本信息：UI 展示用；build_variant 决定检查更新时该下载哪个资产。
+        # 不放进 _FIELDS，避免被 update_status() 误改。
+        from src.version import __version__
+        snapshot["version"] = __version__
+        snapshot["build_variant"] = "full" if _resolve_rag_availability() else "lite"
+        snapshot["is_frozen"] = bool(getattr(_sys, "frozen", False))
         return snapshot
 
     def add_client(self, sock):
@@ -1414,6 +1420,54 @@ def _is_lan_public(path: str, method: str) -> bool:
     return False
 
 
+def _is_local_only(path: str) -> bool:
+    """只能在本机执行的操作（手机经局域网访问一律拒绝）。
+
+    关程序、装更新这类动作如果对手机端开放，等于"配对过的手机就能
+    远程关掉你电脑上的程序"，所以一律只认本机。
+    """
+    if path.startswith("/api/app/"):
+        return True
+    return path in ("/api/update/download", "/api/update/install", "/api/update/skip")
+
+
+# ── 桌面窗口控制回调（由 desktop.py 注册）──────────────────────────────
+# server 不直接操作窗口对象 —— 窗口只能在它自己的 GUI 线程里动，
+# 这里只保存回调，收到请求时转交给 desktop.py 执行。
+_app_control_lock = threading.Lock()
+_app_control = {"close": None, "show": None, "exit": None}
+
+
+def register_app_control(**handlers) -> None:
+    """desktop.py 创建窗口后调用，注册 close / show / exit 三个回调。"""
+    with _app_control_lock:
+        for key in ("close", "show", "exit"):
+            if callable(handlers.get(key)):
+                _app_control[key] = handlers[key]
+
+
+def _app_handler(name: str):
+    with _app_control_lock:
+        return _app_control.get(name)
+
+
+def read_env_key(key: str, default: str = "") -> str:
+    """现读 .env 里的一个配置项（改完立即生效，不用重启进程）。"""
+    try:
+        env_path = _find_or_create_env()
+        if env_path and env_path.exists():
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                name, value = stripped.split("=", 1)
+                if name.strip() == key:
+                    return value.strip()
+    except Exception as exc:
+        logger.debug("读取 .env 键 %s 失败: %s", key, exc)
+    return default
+
+
 _lan_auth = _Lanauth()
 
 
@@ -1473,6 +1527,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
         post_path = self.path.split("?")[0] if "?" in self.path else self.path
 
         if post_path in ("/api/config", "/api/config/import", "/api/config/test-connection", "/api/start", "/api/stop",
+                         "/api/update/download", "/api/update/cancel", "/api/update/skip", "/api/update/install",
+                         "/api/app/close-intent", "/api/app/show", "/api/app/exit",
                          "/api/lan/enable", "/api/lan/disable", "/api/lan/kick",
                          "/api/nicknames",
                          "/api/onboarding/reset",
@@ -1603,6 +1659,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 return
             path_only = self.path.split("?")[0]
             if not _is_lan_public(path_only, self.command):
+                # 关程序、装更新之类的操作，手机端一律不许
+                if _is_local_only(path_only):
+                    self.send_json({"error": "该操作仅限本机执行"}, 403)
+                    return
                 session = _parse_cookie(self.headers.get("Cookie", ""), "lan_session")
                 if not session or not _lan_auth.check_session(session):
                     self.send_json({"error": "unauthorized"}, 401)
@@ -1726,6 +1786,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     "db_path": raw.get("DB_PATH", ""),
                     "has_key": bool(raw.get("WCDB_KEY", "")),
                     "key_preview": raw.get("WCDB_KEY", ""),
+                    "close_action": raw.get("CLOSE_ACTION", "ask"),
+                    "auto_check_update": raw.get("AUTO_CHECK_UPDATE", "true").lower() == "true",
                 },
                 "detected_data_dir": _detect_default_data_dir(),
             })
@@ -1801,6 +1863,12 @@ class _UIHandler(SimpleHTTPRequestHandler):
                         "WCDB_KEY": config.get("wcdb_key"),
                         "WXID": config.get("wxid"),
                         "DB_PATH": config.get("db_path"),
+                        # 通用分区：这两项改了立即生效，不需要重启
+                        "CLOSE_ACTION": config.get("close_action"),
+                        "AUTO_CHECK_UPDATE": (
+                            None if config.get("auto_check_update") is None
+                            else str(bool(config.get("auto_check_update"))).lower()
+                        ),
                     }
                     seen = set()
                     for line in lines:
@@ -2583,6 +2651,76 @@ class _UIHandler(SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(_status.snapshot(), ensure_ascii=False).encode())
             return
 
+            return
+
+        # ── API: 检查更新 / 下载进度 ──────────────────────────────────
+        if self.path.startswith("/api/update/check"):
+            from src.web import update as _update
+            force = "force=1" in self.path or "force=true" in self.path
+            self.send_json(_update.check_update(force=force))
+            return
+
+        if self.path == "/api/update/progress":
+            from src.web import update as _update
+            self.send_json({"ok": True, "state": _update.download_state()})
+            return
+
+        # ── API: 更新包 下载 / 取消 / 忽略 / 安装（仅本机）─────────────
+        if self.command == "POST" and self.path in (
+            "/api/update/download", "/api/update/cancel",
+            "/api/update/skip", "/api/update/install",
+        ):
+            from src.web import update as _update
+            if self.path == "/api/update/download":
+                self.send_json(_update.start_download())
+            elif self.path == "/api/update/cancel":
+                self.send_json(_update.cancel_download())
+            elif self.path == "/api/update/skip":
+                payload = self._read_json_object()
+                self.send_json(_update.mark_skipped(payload.get("version", "")))
+            else:
+                result = _update.install_update()
+                self.send_json(result)
+                if result.get("ok"):
+                    # 先把响应发出去，再退出进程，让前端能显示"正在更新"
+                    _update.schedule_app_exit(delay=1.5)
+            return
+
+        # ── API: 窗口控制（仅本机；回调由 desktop.py 注册）────────────
+        if self.command == "POST" and self.path in (
+            "/api/app/close-intent", "/api/app/show", "/api/app/exit",
+        ):
+            handler_key = {
+                "/api/app/close-intent": "close",
+                "/api/app/show": "show",
+                "/api/app/exit": "exit",
+            }[self.path]
+            handler = _app_handler(handler_key)
+            if handler is None:
+                self.send_json({"ok": False, "error": "当前不是桌面窗口模式"})
+                return
+
+            if handler_key == "close":
+                payload = self._read_json_object()
+                action = str(payload.get("action") or "")
+                if action not in ("tray", "quit"):
+                    self.send_json({"ok": False, "error": "未知的关闭方式"})
+                    return
+                remember = bool(payload.get("remember"))
+                if remember:
+                    # 记住选择 → 写进 .env，字段名与系统配置 › 通用 一致
+                    try:
+                        from src.config import write_env_atomic
+                        write_env_atomic(_find_or_create_env(), {"CLOSE_ACTION": action})
+                        os.environ["CLOSE_ACTION"] = action
+                    except Exception as exc:
+                        logger.warning("记住关闭方式失败: %s", exc)
+                self.send_json({"ok": True, "action": action, "remembered": remember})
+                handler(action)
+                return
+
+            self.send_json({"ok": True})
+            handler()
             return
 
         # ── API: Get logs ────────────────────────────────────────────
@@ -4573,6 +4711,22 @@ class _UIHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
+
+    def _read_json_object(self) -> dict:
+        """读取请求体里的 JSON 对象；读不到或格式不对就返回空字典。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            return {}
+        length = min(length, self.MAX_BODY_SIZE)
+        if length <= 0:
+            return {}
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception as exc:
+            logger.debug("解析请求体失败: %s", exc)
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
 
 def _run_server(host, port):

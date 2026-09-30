@@ -12,6 +12,7 @@ pywin32>=300
 comtypes>=1.4
 pywebview>=5.0
 Pillow>=10.0
+pystray>=0.19.5
 psutil>=5.0
 pyperclip>=1.8
 silk-python>=0.2.0

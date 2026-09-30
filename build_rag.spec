@@ -11,6 +11,58 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(SPECPATH)
 
+# ── exe 版本资源 ───────────────────────────────────────────────────────
+# 版本号从 src/version.py 读取（纯文本正则提取，不 import src 包），
+# 在 build/ 下生成 PyInstaller 版本资源文件，让 exe 的右键属性里
+# 显示出正确版本，避免再出现"程序里写着 1.0.1、Release 上却是 v1.6.0"。
+import re as _re
+
+
+def _read_app_version() -> str:
+    src = (PROJECT_ROOT / 'src' / 'version.py').read_text(encoding='utf-8')
+    match = _re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', src, _re.M)
+    if not match:
+        raise RuntimeError('src/version.py 中找不到 __version__')
+    return match.group(1)
+
+
+APP_VERSION = _read_app_version()
+_ver_tuple = tuple(int(x) for x in APP_VERSION.split('.'))
+_ver_tuple = (_ver_tuple + (0, 0, 0, 0))[:4]
+
+_version_file = PROJECT_ROOT / 'build' / 'version_info.txt'
+_version_file.parent.mkdir(parents=True, exist_ok=True)
+_version_file.write_text(
+    "VSVersionInfo(\n"
+    "  ffi=FixedFileInfo(\n"
+    f"    filevers={_ver_tuple},\n"
+    f"    prodvers={_ver_tuple},\n"
+    "    mask=0x3f,\n"
+    "    flags=0x0,\n"
+    "    OS=0x40004,\n"
+    "    fileType=0x1,\n"
+    "    subtype=0x0,\n"
+    "    date=(0, 0)\n"
+    "  ),\n"
+    "  kids=[\n"
+    "    StringFileInfo([\n"
+    "      StringTable('040904B0', [\n"
+    "        StringStruct('CompanyName', 'MaleleStudySpace'),\n"
+    "        StringStruct('FileDescription', 'wx-assist'),\n"
+    f"        StringStruct('FileVersion', '{APP_VERSION}'),\n"
+    "        StringStruct('InternalName', 'wx-assist'),\n"
+    "        StringStruct('LegalCopyright', 'MIT License'),\n"
+    "        StringStruct('OriginalFilename', 'wx-assist.exe'),\n"
+    "        StringStruct('ProductName', 'wx-assist'),\n"
+    f"        StringStruct('ProductVersion', '{APP_VERSION}'),\n"
+    "      ])\n"
+    "    ]),\n"
+    "    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n"
+    "  ]\n"
+    ")\n",
+    encoding='utf-8',
+)
+
 # ── Resolve webview runtime DLLs dynamically ───────────────────────────
 def _find_webview_runtime_dir():
     """Find the webview package's runtime directory in site-packages."""
@@ -54,6 +106,7 @@ a = Analysis(
         ('ui/dist', 'ui/dist'),
         ('lib/wasm', 'lib/wasm'),
         ('.env.example', '.'),
+        ('favicon.ico', '.'),  # 最小化到托盘时要用它做图标
         # RAG embedding model (~182MB, needed for semantic search)
         (str(PROJECT_ROOT / 'models'), 'models'),
         # data/ is runtime-generated — do NOT bundle into read-only _MEIPASS
@@ -98,6 +151,7 @@ a = Analysis(
         'uiautomation',
         'webview', 'webview.platforms', 'webview.platforms.edgechromium',
         'PIL', 'PIL.Image', 'PIL.ImageDraw',
+        'pystray', 'pystray._win32',
         'requests', 'urllib3',
         'APScheduler', 'apscheduler.schedulers.background', 'apscheduler.triggers.cron',
         'zstandard', 'Crypto',
@@ -178,4 +232,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(PROJECT_ROOT / 'favicon.ico'),
+    version=str(_version_file),
 )
