@@ -1775,7 +1775,7 @@ def _detect_service_accounts(client, sessions: list) -> set[str]:
     all_ids = [s.get("username", "") for s in sessions
                if s.get("username", "")
                and "@chatroom" not in s.get("username", "")
-               and re.fullmatch(r'[a-zA-Z0-9_@]+', s.get("username", ""))]
+               and re.fullmatch(r'[a-zA-Z0-9_@.\-]+', s.get("username", ""))]
     if not all_ids:
         _service_ids_cache = set()
         return set()
@@ -2137,6 +2137,42 @@ def _extract_system_msg_text(content: str) -> str:
     if not content or not content.strip().startswith('<'):
         return content
     import re as _re
+
+    def _uncdata(text: str) -> str:
+        """去掉 <![CDATA[ … ]]> 包装并 trim。"""
+        text = _re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', text, flags=_re.DOTALL)
+        return text.strip()
+
+    def _attr(tag: str, name: str) -> str:
+        m = _re.search(rf'<{tag}[^>]*\b{name}="([^"]*)"', content)
+        return (m.group(1) or "").strip() if m else ""
+
+    # ── 以下三类里都含 <content>/<nickname>，必须先于通用分支处理，否则会被
+    #    误命中并输出错误内容（例如邮件会返回 <subject>…</subject> 整段 XML）。
+
+    # 邮件（type 35）：<msg><pushmail><content><subject><![CDATA[标题]]></subject>…
+    if '<pushmail' in content:
+        m = _re.search(r'<subject>(.*?)</subject>', content, _re.DOTALL)
+        subj = _uncdata(m.group(1)) if m else ""
+        return f"[邮件] {subj}" if subj else "[邮件]"
+
+    # 通话（type 50）：<voipmsg …><VoIPBubbleMsg><msg><![CDATA[通话时长 09:06]]></msg>…
+    if '<voipmsg' in content:
+        m = _re.search(r'<msg>(.*?)</msg>', content, _re.DOTALL)
+        body = _uncdata(m.group(1)) if m else ""
+        return f"[通话] {body}" if body else "[通话]"
+
+    # 位置（type 48）：<msg><location label="…" poiname="…" /></msg>
+    if '<location' in content:
+        label = _attr('location', 'label') or _attr('location', 'poiname')
+        return f"[位置] {label}" if label else "[位置]"
+
+    # 名片（type 42）：<msg bigheadimgurl="…" nickname="…" … />
+    if '<appmsg' not in content and '<img' not in content:
+        nick = _attr('msg', 'nickname')
+        if nick:
+            return f"[名片] {nick}"
+
     # Try <content>...</content> inside <sysmsg> (system messages)
     match = _re.search(r'<content>(.*?)</content>', content, _re.DOTALL)
     if match:
@@ -2153,11 +2189,14 @@ def _extract_system_msg_text(content: str) -> str:
             return title
     # Try <nickname>...</nickname> for mmchatroomtopmsg (群置顶通知)
     # Format: <sysmsg type="mmchatroomtopmsg"><mmchatroomtopmsg><nickname>xxx</nickname>...</mmchatroomtopmsg></sysmsg>
-    match = _re.search(r'<nickname>(.*?)</nickname>', content, _re.DOTALL)
-    if match:
-        nickname = match.group(1).strip()
-        if nickname:
-            return f"{nickname} 置顶了一条消息"
+    # 注意：名片等类型也带 <nickname>，所以这里限定必须有 mmchatroomtopmsg，
+    # 否则会把名片显示成"XXX 置顶了一条消息"。
+    if 'mmchatroomtopmsg' in content:
+        match = _re.search(r'<nickname>(.*?)</nickname>', content, _re.DOTALL)
+        if match:
+            nickname = match.group(1).strip()
+            if nickname:
+                return f"{nickname} 置顶了一条消息"
     # Unrecognizable XML — return empty to avoid leaking raw XML
     return ""
 
@@ -3419,13 +3458,17 @@ def handle_chat_group_members(params, config: AssistantConfig):
         friend_set = set()
         if member_wxids:
             try:
-                # Validate all wxids to prevent SQL injection
-                for wxid in member_wxids:
-                    if not re.fullmatch(r'[a-zA-Z0-9_@]+', wxid):
-                        logger.warning(f"Skipping invalid wxid in group_members: {wxid}")
-                        continue
-                quoted = ",".join(f"'{wxid}'" for wxid in member_wxids
-                                  if re.fullmatch(r'[a-zA-Z0-9_@]+', wxid))
+                # Validate all wxids to prevent SQL injection.
+                # 字符集**必须**包含 '-' 和 '.'：很多用户把微信号设成
+                # zhangtao-1108 / smile-memo 这类，之前只允许 [a-zA-Z0-9_@]
+                # 会把这些成员整个剔除 → 他们的 is_friend 恒为 False，而前端
+                # 「群内好友」面板按 is_friend 过滤（ChatTab.jsx:488），会静默漏人。
+                safe_ids = [w for w in member_wxids
+                            if re.fullmatch(r'[a-zA-Z0-9_@.\-]+', w)]
+                if len(safe_ids) != len(member_wxids):
+                    logger.debug("group_members: 跳过 %d 个非标准 wxid",
+                                 len(member_wxids) - len(safe_ids))
+                quoted = ",".join(f"'{wxid}'" for wxid in safe_ids)
                 sql = f"SELECT username FROM contact WHERE username IN ({quoted}) AND local_type = 1"
                 rows = client.exec_query("contact", "", sql)
                 for row in rows:
@@ -3612,7 +3655,7 @@ def handle_chat_common_groups(params, config: AssistantConfig):
             return {"ok": False, "error": "Missing wxid parameter"}
         # Validate wxid format to prevent SQL injection (WCDB exec_query
         # doesn't support parameterized queries, so we whitelist chars)
-        if not re.fullmatch(r'[a-zA-Z0-9_@]+', friend_wxid):
+        if not re.fullmatch(r'[a-zA-Z0-9_@.\-]+', friend_wxid):
             return {"ok": False, "error": "Invalid wxid format"}
 
         # Strategy: use chatroom_member table (numeric IDs) joined with
@@ -3983,22 +4026,44 @@ def _anti_revoke_get_session_ids(client) -> list[str]:
             if s.get("username") and not s.get("username", "").startswith("@placeholder")]
 
 
+# 受限功能（消息防撤回 / 朋友圈防删）需要在**微信原始数据库**里创建 SQLite
+# 触发器，属于"写回"操作。当前数据库读取已改为纯 Python 只读方案
+# （src/wechat/db_crypto.py + db_reader.py），无法写回，因此这两个功能
+# 不可用，恒返回 False。
+#
+# 效果：/api/chat/anti-revoke/status 与 /api/sns/protect/status 会返回
+# {"disabled": True}，前端据此外隐藏相关入口（见 ChatTab.jsx 与
+# MomentsTab.jsx 里的 restrictedEnabled 判断）。
+#
+# 将来若 wcdb_api.dll 恢复可用、或换用具备写能力的实现，把这里改回 True
+# 即可恢复（环境变量 ENABLE_RESTRICTED_FEATURES 仍然生效）。
+_RESTRICTED_FEATURES_AVAILABLE = False
+
+
 def _is_restricted_enabled() -> bool:
-    """Check if restricted features are enabled (from env var, not config object)."""
+    """受限功能（防撤回 / 朋友圈防删）是否可用。
+
+    这些功能需要写回微信原始数据库，纯 Python 只读方案无法实现，故恒为 False。
+    """
+    if not _RESTRICTED_FEATURES_AVAILABLE:
+        return False
     return os.getenv("ENABLE_RESTRICTED_FEATURES", "false").strip().lower() == "true"
 
 
 def cleanup_restricted_triggers():
-    """If ENABLE_RESTRICTED_FEATURES=false, uninstall any lingering sensitive triggers.
+    """清理微信库里可能残留的防撤回 / 防删触发器。
 
-    Called once at bot startup to ensure no anti-revoke or SNS block-delete
-    triggers remain active when the config switch is off.  Triggers persist
-    in the WCDB file across restarts, so merely disabling the API is not
-    enough — the triggers would continue intercepting revocations/deletes.
+    触发器是持久化在微信数据库文件里的，仅停用 API 不会让它们失效。
+    但当前是只读模式，无法卸载，因此这里只做检测与告警，不做实际清理。
     """
     if _is_restricted_enabled():
         logger.info("Restricted features enabled — skipping trigger cleanup")
         return
+
+    logger.info(
+        "受限功能（防撤回 / 朋友圈防删）在当前只读模式下不可用，相关入口已隐藏。"
+        "若微信库中仍残留旧版触发器，需使用具备写能力的工具清理。"
+    )
 
     client = get_wcdb_client()
     if not client:

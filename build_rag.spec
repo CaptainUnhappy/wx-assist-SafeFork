@@ -95,12 +95,10 @@ a = Analysis(
     binaries=[
         (str(_webview_runtime), './runtimes/win-x64/native'),
         (str(_webview_interop), './lib'),
-        (str(PROJECT_ROOT / 'lib' / 'wcdb_api.dll'), 'lib'),
-        (str(PROJECT_ROOT / 'lib' / 'WCDB.dll'), 'lib'),
-        (str(PROJECT_ROOT / 'lib' / 'MSVCP140.dll'), 'lib'),
-        (str(PROJECT_ROOT / 'lib' / 'VCRUNTIME140.dll'), 'lib'),
-        (str(PROJECT_ROOT / 'lib' / 'VCRUNTIME140_1.dll'), 'lib'),
-        (str(PROJECT_ROOT / 'lib' / 'wx_key.dll'), 'lib'),
+        # 注意：不再打包 wcdb_api.dll / WCDB.dll / SDL2.dll。
+        # 数据库读取已改为纯 Python（PBKDF2 + AES-CBC 分页解密 + sqlite3），
+        # 见 src/wechat/db_crypto.py 与 src/wechat/db_reader.py。
+        (str(PROJECT_ROOT / 'lib' / 'wx_key.dll'), 'lib'),  # 密钥提取仍需要
     ],
     datas=[
         ('ui/dist', 'ui/dist'),

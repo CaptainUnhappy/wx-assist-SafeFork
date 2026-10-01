@@ -754,51 +754,22 @@ class V2CacheManager:
             return None
 
     def _resolve_hardlink(self, md5: str, wxid: str) -> Optional[str]:
-        """Use wcdb_api.dll hardlink resolution to find .dat file by MD5.
+        """通过 hardlink.db 由 MD5 定位 ``.dat`` 文件（纯 Python 实现）。
 
-        Calls wcdb_resolve_image_hardlink(handle, md5, accountDir, &outPtr)
-        which queries hardlink.db internally.
+        原先调用 ``wcdb_api.dll`` 的 ``wcdb_resolve_image_hardlink``；该 DLL
+        已停用，改为查询 ``hardlink.db`` 的 ``image_hardlink_info_v4`` 表，
+        再用 ``dir2id`` 还原目录名。
         """
-        try:
-            import ctypes as ct
-
-            # Get a reader with an active DLL handle
-            reader = _get_reader_for_wxid(wxid)
-            if not reader or not hasattr(reader, '_dll') or not hasattr(reader, '_handle'):
-                return None
-
-            dll = reader._dll
-            handle = reader._handle
-
-            # Configure function signature
-            dll.wcdb_resolve_image_hardlink.argtypes = [
-                ct.c_int64, ct.c_char_p, ct.c_char_p,
-                ct.POINTER(ct.c_void_p),
-            ]
-            dll.wcdb_resolve_image_hardlink.restype = ct.c_int32
-            dll.wcdb_free_string.argtypes = [ct.c_void_p]
-            dll.wcdb_free_string.restype = None
-
-            account_dir = str(self._data_dir / wxid)
-
-            out_ptr = ct.c_void_p()
-            ret = dll.wcdb_resolve_image_hardlink(
-                handle, md5.encode(), account_dir.encode(), ct.byref(out_ptr)
-            )
-
-            if ret == 0 and out_ptr.value:
-                import json
-                raw = ct.cast(out_ptr, ct.c_char_p).value
-                result_str = raw.decode('utf-8', errors='replace') if raw else ""
-                dll.wcdb_free_string(out_ptr)
-
-                if result_str and result_str != '{}':
-                    data = json.loads(result_str)
-                    full_path = data.get('full_path', '')
-                    if full_path:
-                        return full_path
-
+        if not md5:
             return None
+        try:
+            from src.web.api_handlers import get_wcdb_client
+
+            client = get_wcdb_client()
+            if not client:
+                return None
+            path = client.resolve_image_hardlink(md5)
+            return path or None
         except Exception:
             return None
 

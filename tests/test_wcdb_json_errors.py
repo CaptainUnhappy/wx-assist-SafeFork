@@ -1,100 +1,96 @@
-"""WCDB JSON 读取错误分类与启动降级的回归测试。
+"""数据库读取层的回归测试。
+
+历史说明
+--------
+本文件原先测试 ``wcdb_api.dll`` 的 JSON 读取错误分类（``_read_gbk_string_ex``
+截断检测、``_call_json_inner`` 异常分级）。该 DLL 已不再使用——读取层改为
+纯 Python 实现（见 ``src/wechat/db_crypto.py`` 与 ``src/wechat/db_reader.py``），
+因此相关用例一并移除，替换为解密层的单元测试。
 
 覆盖：
-- ``_read_gbk_string_ex`` 能识别输出被截断（结果过大）。
-- ``_read_gbk_string`` 保持原有签名/行为（非 JSON 调用方兼容）。
-- ``_call_json_inner`` 区分「结果过大」与「数据损坏」，意外异常仍返回 {}。
+- ``db_crypto`` 的密钥解析与页加解密往返。
 - 群组解析失败时 ``WcdbBackend.start`` 不再让整个服务崩溃。
 """
-import ctypes as ct
 from unittest.mock import Mock
 
 import pytest
 
+from src.wechat import db_crypto
 from src.wechat.wcdb_backend import WcdbBackend
-from src.wechat.wcdb_client import (
-    WcdbNativeClient,
-    _read_gbk_string,
-    _read_gbk_string_ex,
-)
 
 
-def _ct_string(data: bytes):
-    """返回 (c_void_p 指针, 保活 buffer)，防止 buffer 被回收。"""
-    buf = ct.create_string_buffer(data)
-    return ct.cast(buf, ct.c_void_p), buf
+# ── 解密层：密钥解析 ──────────────────────────────────────────────
+
+def test_parse_key_accepts_64_hex_chars():
+    key = "ab" * 32
+    assert db_crypto.parse_key(key) == bytes.fromhex(key)
 
 
-# ── 读取层：截断检测 ──────────────────────────────────────────────
-
-def test_read_gbk_string_ex_marks_complete_payload():
-    ptr, _keep = _ct_string(b'{"ok": true}')
-    text, truncated = _read_gbk_string_ex(ptr)
-    assert text == '{"ok": true}'
-    assert truncated is False
+def test_parse_key_rejects_wrong_length():
+    with pytest.raises(db_crypto.DecryptError):
+        db_crypto.parse_key("abcd")
 
 
-def test_read_gbk_string_ex_detects_truncation():
-    ptr, _keep = _ct_string(b'{"ok": true}')
-    _text, truncated = _read_gbk_string_ex(ptr, max_bytes=4)
-    assert truncated is True
+def test_parse_key_rejects_non_hex():
+    with pytest.raises(db_crypto.DecryptError):
+        db_crypto.parse_key("zz" * 32)
 
 
-def test_read_gbk_string_wrapper_signature_unchanged():
-    """非 JSON 调用方仍拿到纯字符串（保持向后兼容）。"""
-    ptr, _keep = _ct_string(b'{"ok": true}')
-    assert _read_gbk_string(ptr) == '{"ok": true}'
+# ── 解密层：页加解密往返 ──────────────────────────────────────────
+
+def test_encrypt_decrypt_page_roundtrip():
+    """加密后再解密应还原出相同的明文页。"""
+    enc_key = b"\x11" * 32
+    salt = b"\x5a" * 16
+    plain = bytearray(b"\x00" * db_crypto.PAGE_SIZE)
+    plain[:16] = db_crypto.SQLITE_HEADER
+    plain[16:64] = bytes(range(48))
+
+    encrypted = db_crypto.encrypt_page(bytes(plain), enc_key, page_no=1, salt=salt)
+    assert len(encrypted) == db_crypto.PAGE_SIZE
+    assert encrypted[:16] == salt              # 加密页头部是 salt，不是文件头
+    assert encrypted != bytes(plain)
+
+    decrypted = db_crypto.decrypt_page(encrypted, enc_key, page_no=1)
+    assert decrypted[:16] == db_crypto.SQLITE_HEADER
+    assert decrypted[16:64] == bytes(range(48))
 
 
-# ── JSON 解析层：异常分类 ─────────────────────────────────────────
-
-def _fake_client():
-    """绕过 __init__，避免触发真实 DLL 加载。"""
-    client = WcdbNativeClient.__new__(WcdbNativeClient)
-    client._dll = Mock()
-    return client
+def test_decrypt_page_shorter_input_is_padded():
+    """不足一页的输入应被补齐后解密，不抛异常。"""
+    enc_key = b"\x22" * 32
+    result = db_crypto.decrypt_page(b"\x00" * 100, enc_key, page_no=2)
+    assert len(result) == db_crypto.PAGE_SIZE
 
 
-def _dll_func(ptr_value=1):
-    """模拟返回 JSON 指针的 DLL 函数：把 out 指针写成非 0 后返回 0。"""
-    def func(_handle, out_ref):
-        out_ref._obj.value = ptr_value
-        return 0
-    return func
+def test_verify_key_returns_false_for_wrong_key(tmp_path):
+    """密钥错误时首页 HMAC 校验必须失败。"""
+    real_key = bytes.fromhex("cd" * 32)
+    wrong_key = bytes.fromhex("ef" * 32)
+    salt = b"\x01" * 16
 
-
-def test_call_json_inner_raises_too_large_when_truncated(monkeypatch):
-    monkeypatch.setattr(
-        "src.wechat.wcdb_client._read_gbk_string_ex",
-        lambda _ptr: ('{"a": 1', True),
+    enc_key, mac_key = db_crypto.derive_keys(real_key, salt)
+    plain = bytearray(b"\x00" * db_crypto.PAGE_SIZE)
+    plain[:16] = db_crypto.SQLITE_HEADER
+    page = db_crypto.encrypt_page(
+        bytes(plain), enc_key, page_no=1, salt=salt, mac_key=mac_key
     )
-    client = _fake_client()
-    with pytest.raises(ValueError) as exc:
-        client._call_json_inner(_dll_func(), 0)
-    assert "too large" in str(exc.value)
+
+    db_file = tmp_path / "sample.db"
+    db_file.write_bytes(page)
+
+    assert db_crypto.verify_key(real_key, db_file) is True
+    assert db_crypto.verify_key(wrong_key, db_file) is False
 
 
-def test_call_json_inner_raises_corrupted_without_truncation(monkeypatch):
-    monkeypatch.setattr(
-        "src.wechat.wcdb_client._read_gbk_string_ex",
-        lambda _ptr: ("not-json", False),
-    )
-    client = _fake_client()
-    with pytest.raises(ValueError) as exc:
-        client._call_json_inner(_dll_func(), 0)
-    message = str(exc.value)
-    assert "corrupted" in message
-    assert "too large" not in message
+def test_is_plaintext_db_detects_sqlite_header(tmp_path):
+    plain = tmp_path / "plain.db"
+    plain.write_bytes(db_crypto.SQLITE_HEADER + b"\x00" * 64)
+    assert db_crypto.is_plaintext_db(plain) is True
 
-
-def test_call_json_inner_keeps_swallowing_unexpected_errors(monkeypatch):
-    """非解析类异常必须仍返回 {}（保持原有容错行为）。"""
-    def boom(_ptr):
-        raise RuntimeError("unexpected")
-
-    monkeypatch.setattr("src.wechat.wcdb_client._read_gbk_string_ex", boom)
-    client = _fake_client()
-    assert client._call_json_inner(_dll_func(), 0) == {}
+    other = tmp_path / "enc.db"
+    other.write_bytes(b"\x9f\x4a" * 32)
+    assert db_crypto.is_plaintext_db(other) is False
 
 
 # ── 启动层：群组解析失败不再让服务崩溃 ────────────────────────────

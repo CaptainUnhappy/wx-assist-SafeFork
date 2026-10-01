@@ -385,6 +385,8 @@ class ServerStatusTests(unittest.TestCase):
             "timestamp", "error", "avatar_url", "wx_name",
             "restricted_features_enabled",
             "mcp_servers", "rag_available", "rag_enabled", "rag_ok", "im_channels",
+            # 版本信息：供界面展示，并决定检查更新时下载哪个变体的安装包
+            "version", "build_variant", "is_frozen",
         }
         self.assertEqual(set(snap.keys()), expected_fields)
 

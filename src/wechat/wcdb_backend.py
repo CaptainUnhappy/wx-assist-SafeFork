@@ -30,6 +30,25 @@ MAX_DEDUP_SIZE = 100000  # 容纳所有已有 message_id，防止轮询中因 ev
 MAX_CONSECUTIVE_ERRORS = 5   # trigger reinit after this many consecutive failures
 
 
+# 微信的"占位会话"：不是真实聊天，没有消息表，也不该进轮询列表或群名映射。
+# 实测会混入 brandsessionholder / brandservicesessionholder /
+# brandprivatemsg@hardcode / @placeholder_foldgroup / @placeholder_oa /
+# @opencustomerservicemsg 等。
+_PLACEHOLDER_PREFIXES = ("@placeholder_", "@opencustomerservicemsg", "brand")
+_PLACEHOLDER_SUFFIXES = ("holder",)
+
+
+def _is_placeholder_talker(username: str) -> bool:
+    """判断是否为微信内部占位会话（非真实聊天）。"""
+    u = (username or "").strip()
+    if not u:
+        return True
+    low = u.lower()
+    if low.startswith(_PLACEHOLDER_PREFIXES):
+        return True
+    return any(low.endswith(sfx) for sfx in _PLACEHOLDER_SUFFIXES)
+
+
 class WcdbBackend(AbstractWeChatBackend):
     """Native WCDB backend — database read + window send.
 
@@ -55,6 +74,17 @@ class WcdbBackend(AbstractWeChatBackend):
         self._client: Optional[WcdbNativeClient] = None
         self._window = WeChatWindowController()
         self._talker_ids: dict[str, str] = {}
+        # 待轮询清单 [(显示名, talker)]。与 _talker_ids 的区别：_talker_ids 以
+        # **显示名**为键，两个不同会话同名时会互相覆盖（实测 603 -> 563，丢掉
+        # 40 个会话，其中 4 个是活跃群）；本清单逐会话保留，保证一个都不丢。
+        self._poll_targets: list[tuple[str, str]] = []
+        # 是否"监控全部会话"。必须在构造时判定一次：_resolve_groups() 之后
+        # self._groups 会被替换成解析结果，届时再按长度判断会误判成手工模式，
+        # 走子串匹配从而把名字映射到错误的 talker。
+        self._is_auto = (
+            not self._groups
+            or (len(self._groups) == 1 and self._groups[0].strip() in ("*", "all", ""))
+        )
         self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
         # Remember the smallest working batch per talker. Large公众号
         # payloads should not retry a known-bad limit on every poll cycle.
@@ -303,9 +333,15 @@ class WcdbBackend(AbstractWeChatBackend):
 
         # Build a map of all sessions: username -> best display name
         all_talkers: dict[str, str] = {}
+        skipped_placeholder = 0
         for s in sessions:
             username = str(s.get("username", "") or "")
             if not username:
+                continue
+            if _is_placeholder_talker(username):
+                # @placeholder_foldgroup / brand*holder 等是微信的占位会话，
+                # 既没有消息表也不该出现在轮询/群名映射里。
+                skipped_placeholder += 1
                 continue
 
             # Try session-level display name fields (rarely populated)
@@ -315,16 +351,21 @@ class WcdbBackend(AbstractWeChatBackend):
                 or ""
             ).strip()
             if not display:
-                # Fall back to DLL lookup (resolves via contacts DB + nicknames)
+                # Fall back to contacts-based lookup (remark > nick_name > alias)
                 display = self._client.resolve_nickname(username)
             if not display or display == username:
-                # Last resort: try last_sender_display_name from session,
-                # or use the numeric prefix of username as label
-                display = str(s.get("last_sender_display_name", "") or "").strip()
-                if not display or display == username:
-                    display = username  # fallback
+                # 兜底用 username 本身。
+                # 注意：**不要**用 last_sender_display_name —— 那是"该会话最后一条
+                # 消息的发送者昵称"，不是会话名。用它会导致张冠李戴（实测 7 例，
+                # 例如把 @placeholder_foldgroup 命名成某个成员昵称），并制造大量
+                # 同名冲突。
+                display = username
 
             all_talkers[username] = display
+
+        if skipped_placeholder:
+            logger.info("[GROUPS] 已跳过 %d 个占位会话（@placeholder_* / brand*holder）",
+                        skipped_placeholder)
 
         if not all_talkers:
             logger.error(
@@ -334,21 +375,25 @@ class WcdbBackend(AbstractWeChatBackend):
             )
             return
 
-        auto_discover = (
-            not self._groups
-            or (len(self._groups) == 1 and self._groups[0].strip() in ("*", "all", ""))
-        )
+        # 重置解析结果，保证 _resolve_groups 可重复调用（_reinitialize 会再调一次）
+        self._talker_ids = {}
+        self._poll_targets = []
 
-        if auto_discover:
+        if self._is_auto:
             for username, display in all_talkers.items():
-                self._talker_ids[display] = username
+                # 每个会话都进轮询清单——同名不会互相覆盖
+                self._poll_targets.append((display, username))
+                # 按名查找保留首个（供 _send_and_confirm / 日志用）
+                self._talker_ids.setdefault(display, username)
             chatroom_count = sum(1 for u in all_talkers if u.endswith("@chatroom"))
             contact_count = len(all_talkers) - chatroom_count
+            dup = len(all_talkers) - len(self._talker_ids)
             logger.info(
-                "Auto-discovered %d talkers: %d chatrooms + %d contacts",
-                len(self._talker_ids), chatroom_count, contact_count,
+                "Auto-discovered %d talkers (%d chatrooms + %d contacts); "
+                "%d 个同名显示名，仍全部轮询",
+                len(self._poll_targets), chatroom_count, contact_count, dup,
             )
-            self._groups = list(self._talker_ids.keys())
+            self._groups = [name for name, _ in self._poll_targets]
 
         else:
             # Manual mode: match configured names against resolved display names
@@ -360,10 +405,13 @@ class WcdbBackend(AbstractWeChatBackend):
                         break
                 if found:
                     self._talker_ids[group_name] = found
-                    logger.info("Resolved '%s' -> %s (display='%s')", group_name, found, all_talkers.get(found, ""))
+                    self._poll_targets.append((group_name, found))
+                    logger.info("Resolved '%s' -> %s (display='%s')",
+                                group_name, found, all_talkers.get(found, ""))
                 else:
                     if group_name in all_talkers:
                         self._talker_ids[group_name] = group_name
+                        self._poll_targets.append((group_name, group_name))
                         logger.info("Resolved '%s' as direct username", group_name)
                     else:
                         logger.warning(
@@ -402,10 +450,14 @@ class WcdbBackend(AbstractWeChatBackend):
     # ── Message polling ──────────────────────────────────────────────
 
     def _poll_cycle(self, callback: MessageCallback) -> None:
-        for group_name in list(self._groups):
+        # 遍历 _poll_targets（逐会话），而不是 _groups + _talker_ids 查表——
+        # 后者在同名时只覆盖到一个会话，会静默漏监控。
+        targets = list(self._poll_targets) or [
+            (name, tid) for name, tid in self._talker_ids.items()
+        ]
+        for group_name, talker in targets:
             if not self._running:
                 break
-            talker = self._talker_ids.get(group_name)
             if not talker:
                 continue
             self._poll_group(group_name, talker, callback)
