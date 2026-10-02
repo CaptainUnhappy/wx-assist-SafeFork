@@ -152,10 +152,14 @@ def _find_account_dir(wxid: str, base_dir: str) -> Path:
 class WcdbNativeClient:
     """微信数据库客户端（纯 Python 实现，接口与旧 DLL 版本一致）。"""
 
-    def __init__(self, dll_dir=None, config_path=None):
+    def __init__(self, dll_dir=None, config_path=None, cache_dir=None):
         # dll_dir / config_path 仅为兼容旧调用方签名而保留，不再使用
         self._dll_dir = dll_dir
         self._config_path = config_path
+        #: 明文快照目录覆盖（默认 data/decrypted_cache）。仅少数场景需要独立
+        #: 目录，例如引导流程里"临时设环境变量 → 新建实例试读 → 立即关闭"的
+        #: 探测：它与主实例共用快照目录时会互相占用文件（WinError 5）。
+        self._cache_dir = Path(cache_dir) if cache_dir else None
 
         self._reader: WeChatDbReader | None = None
         self._key = ""
@@ -241,7 +245,8 @@ class WcdbNativeClient:
             self._account_dir = str(account_dir)
 
             self._reader = WeChatDbReader(
-                account_dir, self._key, cache_dir=self._default_cache_dir(),
+                account_dir, self._key,
+                cache_dir=self._cache_dir or self._default_cache_dir(),
             )
             self._reader.set_my_wxid(self._wxid)
             logger.info("本地读取器已就绪: %s", self._account_dir)
@@ -462,3 +467,46 @@ class WcdbNativeClient:
 
     def delete_sns_post(self, post_id):
         return {"success": False, "error": _UNSUPPORTED}
+
+
+# ── 进程级单例 ───────────────────────────────────────────────────────────
+#
+# 为什么必须单例：读取层把加密库解密成明文快照（``data/decrypted_cache``），
+# 源库变化时用 ``os.replace`` 覆盖快照。Windows 下**被打开的文件无法被替换**，
+# 而每个 WcdbNativeClient 都持有自己的一组 sqlite 连接。同进程若存在两个
+# 实例，一个在覆盖 ``session.db``、另一个的连接还开着，就会抛 WinError 5
+# （拒绝访问），前端表现为"会话列表读取失败，无法解析群组"。
+#
+# 触发路径很常见：Web 服务先起、Bot 后起 —— Web 侧 ``get_wcdb_client()``
+# 发现 backend 还没创建于是自建一个并缓存，Bot 启动后 ``WcdbBackend``
+# 又 new 一个。因此把客户端收敛为进程内唯一实例，所有调用方共用。
+
+_SHARED_CLIENT: WcdbNativeClient | None = None
+_SHARED_LOCK = threading.RLock()
+
+
+def get_shared_client() -> WcdbNativeClient:
+    """返回进程内唯一、且已完成 init + open 的客户端。"""
+    global _SHARED_CLIENT
+    with _SHARED_LOCK:
+        client = _SHARED_CLIENT
+        if client is not None:
+            return client
+        client = WcdbNativeClient()
+        client.init()
+        client.open()
+        # 只有 init + open 都成功才登记，避免半成品被后续复用
+        _SHARED_CLIENT = client
+        return client
+
+
+def reset_shared_client() -> None:
+    """关闭并丢弃共享客户端；下次 :func:`get_shared_client` 会重建。"""
+    global _SHARED_CLIENT
+    with _SHARED_LOCK:
+        client, _SHARED_CLIENT = _SHARED_CLIENT, None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:                          # noqa: BLE001
+            logger.debug("关闭共享客户端失败", exc_info=True)

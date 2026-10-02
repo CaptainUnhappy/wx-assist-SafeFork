@@ -1964,12 +1964,20 @@ class _UIHandler(SimpleHTTPRequestHandler):
                         os.environ["WXID"] = wxid
                         os.environ["DB_PATH"] = db_path
                         try:
-                            client = WcdbNativeClient()
+                            # 探测用**独立缓存目录**：这里是"临时设环境变量 →
+                            # 新建实例试读 → 立刻关闭"，若与主实例共用
+                            # data/decrypted_cache，两边会互相占用明文快照
+                            # （Windows 下无法覆盖 → WinError 5）。
+                            import shutil as _shutil
+                            probe_cache = Path("data/decrypted_cache_probe")
+                            _shutil.rmtree(probe_cache, ignore_errors=True)
+                            client = WcdbNativeClient(cache_dir=probe_cache)
                             client.init()
                             client.open()
                             sessions = client.get_sessions(limit=1)
                             count = len(sessions) if isinstance(sessions, list) else 0
                             client.close()
+                            _shutil.rmtree(probe_cache, ignore_errors=True)
                             checks["wcdb_connect"] = {
                                 "ok": True,
                                 "message": f"连接成功，已检测到 {count} 个会话",

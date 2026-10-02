@@ -241,6 +241,18 @@ def reset_wcdb_client():
         _wcdb_client = None
         _wcdb_fav_reader = None
         _wcdb_sns_reader = None
+    # 注意：这里**只清引用，不关闭共享客户端**。
+    # 停 Bot 可能与其他读取（Bot 自身的轮询、Web 请求）并发，若在此关闭
+    # 进程级共享客户端，会让别人手里那个仍然有效的引用瞬间失效，报
+    # "读取器未初始化"。客户端本身是纯 Python 的进程级对象，不需要随
+    # Bot 生命周期销毁；真正需要重建时（如切换账号/密钥）由配置变更流程
+    # 显式调用 wcdb_client.reset_shared_client()。
+    # 收藏图片解密模块的 reader 池持有该客户端引用，清空以便用新配置重建。
+    try:
+        from src.wechat.v2_cache_decrypt import reset_reader_pool
+        reset_reader_pool()
+    except Exception:                               # noqa: BLE001
+        logger.debug("清空收藏 reader 池失败", exc_info=True)
     logger.info("WCDB client cache cleared (bot stopped)")
 
 
@@ -331,38 +343,30 @@ def _bg_sync_fav(cc):
 
 
 def get_wcdb_client():
-    """Get or create WCDB client singleton.
+    """Get the process-wide WCDB client (shared singleton).
 
-    Prefers reusing the backend's already-initialized client to avoid
-    a second WcdbNativeClient() which crashes the DLL (access violation).
-    Falls back to creating a new one only if no backend exists.
+    必须全进程复用同一个客户端实例：读取层在源库变化时会覆盖
+    ``data/decrypted_cache`` 下的明文快照，而 Windows 下**被打开的文件无法
+    替换**。同进程若存在第二个客户端，它的 sqlite 连接会占住快照文件，导致
+    覆盖时抛 WinError 5，表现为"会话列表读取失败，无法解析群组"。
+
+    此前这里是"优先复用 backend 的 client、否则自建一个"，Web 服务先于 Bot
+    启动时必然走到自建分支，随后 Bot 再 new 一个 —— 两个实例并存即触发上述
+    报错。现在统一走 :func:`src.wechat.wcdb_client.get_shared_client`。
     """
     global _wcdb_client
     if _wcdb_client is not None:
         return _wcdb_client
 
-    logger.info("[API-TRACE] get_wcdb_client: _wcdb_client is None, acquiring _wcdb_init_lock thread=%s", threading.current_thread().name)
     with _wcdb_init_lock:
         # Double-check after acquiring lock
         if _wcdb_client is not None:
             return _wcdb_client
 
-        # Try to reuse the backend's client first (avoids DLL double-init crash)
         try:
-            from src.web.server import _bot_control
-            backend = getattr(_bot_control, "backend", None)
-            if backend is not None and hasattr(backend, "_client") and backend._client is not None:
-                _wcdb_client = backend._client
-                logger.info("Reusing backend WCDB client (no double-init)")
-                return _wcdb_client
-        except Exception:
-            pass
-
-        # Fallback: create our own (only works if no other instance exists)
-        try:
-            _wcdb_client = WcdbNativeClient()
-            _wcdb_client.init()
-            _wcdb_client.open()
+            from src.wechat.wcdb_client import get_shared_client
+            _wcdb_client = get_shared_client()
+            logger.info("WCDB client ready (shared singleton)")
         except Exception as e:
             logger.error(f"Failed to initialize WCDB client: {e}")
             return None

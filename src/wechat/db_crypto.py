@@ -34,6 +34,7 @@ import logging
 import os
 import struct
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -301,6 +302,32 @@ def merge_wal(enc_key: bytes, mac_key: bytes, main_path: Path,
     return applied
 
 
+def _replace_with_retry(tmp: Path, dst: Path, attempts: int = 5,
+                        delay: float = 0.2) -> None:
+    """原子替换明文库，对 Windows 的"目标被占用"做短暂重试。
+
+    ``os.replace`` 在目标文件被其他句柄打开时抛 ``PermissionError``
+    （WinError 5）——例如另一个进程、杀软扫描，或同进程里另一处打开的快照。
+    这类占用常常是瞬时的，重试几次即可成功；仍失败则抛出，由调用方决定
+    是降级沿用旧快照还是向上报错。
+    """
+    last_exc: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, dst)
+            return
+        except OSError as exc:                     # WinError 5 / 32
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(delay)
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    assert last_exc is not None
+    raise last_exc
+
+
 # ── 整库解密 ─────────────────────────────────────────────────────────
 
 def decrypt_database(
@@ -395,8 +422,13 @@ def decrypt_database(
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".part")
+    # 上次失败可能留下同名 .part（被占用时删不掉，忽略即可）
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
     tmp.write_bytes(out)
-    os.replace(tmp, dst)
+    _replace_with_retry(tmp, dst)
 
     # 明文快照保留了微信库的 WAL 模式：上次打开快照会在旁边生成
     # ``-wal``/``-shm``。若上次进程是崩溃退出（未干净关闭），这些残留
@@ -478,6 +510,10 @@ class DecryptCache:
 
         注意：重新解密会覆盖明文库文件，调用方必须**先关闭**该库上已打开的
         连接（Windows 下被占用的文件无法覆盖）。
+
+        若覆盖仍失败（其他进程/杀软占用了快照，或同进程另有实例），但已存在
+        一份可用的旧快照，则**降级沿用旧快照**并告警——宁可数据略旧，也不能
+        让整个会话列表/消息读取直接报错。
         """
         with self._lock:
             stamp = self._stamp_of(src)
@@ -488,7 +524,17 @@ class DecryptCache:
                     and dst.exists() and dst.stat().st_size > 0):
                 return dst
 
-            stats = decrypt_database(src, dst, self._key_hex)
+            try:
+                stats = decrypt_database(src, dst, self._key_hex)
+            except OSError as exc:
+                if dst.exists() and dst.stat().st_size > 0:
+                    logger.warning(
+                        "重新解密 %s 失败（%s），沿用已有一份快照（数据可能略旧）",
+                        src.name, exc,
+                    )
+                    self._stamps[key] = stamp
+                    return dst
+                raise
             self._stamps[key] = stamp
             logger.debug(
                 "解密 %s -> %s (%d 页, WAL %d 页, 异常 %d 页)",

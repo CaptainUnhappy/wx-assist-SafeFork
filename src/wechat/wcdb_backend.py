@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from .base import AbstractWeChatBackend, MessageCallback
-from .wcdb_client import WcdbNativeClient
+from .wcdb_client import WcdbNativeClient, get_shared_client
 from .window_controller import WeChatWindowController
 from .helpers import DedupSet
 from ..utils.op_logger import op_log, op_log_debug, op_log_error
@@ -110,10 +110,10 @@ class WcdbBackend(AbstractWeChatBackend):
                len(self._groups), self._poll_sec)
 
         # Init and open database
+        # 复用进程内共享客户端：独立 new 一个会有第二个实例占用解密快照文件，
+        # 导致另一处覆盖 session.db 时报 WinError 5。
         try:
-            self._client = WcdbNativeClient()
-            self._client.init()
-            self._client.open()
+            self._client = get_shared_client()
             logger.info("WCDB database opened successfully")
             op_log("DB", "WCDB 数据库打开成功")
 
@@ -245,8 +245,12 @@ class WcdbBackend(AbstractWeChatBackend):
             # Drain in-flight callbacks gracefully
             self._pool.shutdown(wait=True, cancel_futures=True)
             self._pool = None
-            if self._client:
-                self._client.close()
+            # 只解除本 backend 的引用，**不在这里关闭共享客户端**：
+            # 客户端是进程级共享的，Web API 可能正在使用它。若此处异常退出
+            # （如连续错误达到上限）时把它关掉，Web 侧会留在"已关闭"的引用上，
+            # 之后所有读取都报"读取器未初始化"。
+            # 正常停止路径由 server._stop_bot() → reset_wcdb_client() 统一关闭。
+            self._client = None
         logger.info("WcdbBackend stopped.")
 
     def send_text(self, chat_id: str, content: str) -> bool:
@@ -300,10 +304,8 @@ class WcdbBackend(AbstractWeChatBackend):
                 raise
         else:
             try:
-                self._client = WcdbNativeClient()
-                self._client.init()
-                self._client.open()
-                logger.info("WCDB reinitialized successfully (new client)")
+                self._client = get_shared_client()
+                logger.info("WCDB reinitialized successfully (shared client)")
             except Exception as e:
                 logger.error("WCDB reinitialization failed: %s", e)
                 raise

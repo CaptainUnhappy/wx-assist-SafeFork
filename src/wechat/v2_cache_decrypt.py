@@ -935,3 +935,15 @@ def _get_reader_for_wxid(wxid: str):
 
         except Exception:
             return None
+
+
+def reset_reader_pool() -> None:
+    """清空共享 reader 池。
+
+    池里的 ``WcdbFavReader`` 都持有同一个 WCDB 客户端引用。Bot 停止时会关闭
+    该客户端（``reset_wcdb_client``），此时池中条目就变成"持有已关闭客户端"的
+    死引用，再被复用会抛 ``RuntimeError: 读取器未初始化``。因此必须在关闭
+    客户端的同时清空这里，让下次调用重新构建。
+    """
+    with _reader_lock:
+        _readers.clear()
