@@ -524,26 +524,17 @@ def main():
             pass
         return
 
-    # ── Auto-start bot when prerequisites are met ──────────────────
+    # ── Auto-start bot（已完成引导即启动）────────────────────────────
+    # 这里不做任何"微信是否在运行"的前置检测：
+    #   - 密钥来自 .env（一次性提取后持久化），运行期不依赖微信进程；
+    #   - 读取直接读磁盘库文件，微信未运行时同样能读历史数据；
+    #   - 真有问题时 start_bot() 会把准确原因推到界面并复位状态。
+    # 旧代码用 tasklist 检测 WeChat.exe，而微信 4.x 进程名是 Weixin.exe，
+    # 导致 4.x 用户永远不自动启动，属于帮倒忙。
     if not onboarding_needed:
-        # Check 1: WeChat process must be running (WCDB key depends on it)
-        import subprocess as _sp
-        wechat_ok = False
-        try:
-            r = _sp.run(
-                ["tasklist", "/FI", "IMAGENAME eq WeChat.exe", "/NH"],
-                capture_output=True, text=True, timeout=5,
-            )
-            wechat_ok = "WeChat.exe" in r.stdout
-        except Exception:
-            pass
-
-        if wechat_ok:
-            _t = threading.Thread(target=start_bot, daemon=True, name="bot-auto")
-            _t.start()
-            logger.info("Bot auto-started (onboarding done + WeChat running)")
-        else:
-            logger.info("Bot auto-start skipped: WeChat process not found")
+        _t = threading.Thread(target=start_bot, daemon=True, name="bot-auto")
+        _t.start()
+        logger.info("Bot auto-started (onboarding done)")
 
     title = "微信助手 — 初始设置" if onboarding_needed else "微信助手 — Dashboard"
 
