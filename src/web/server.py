@@ -3341,6 +3341,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     ok = outbox.ignore(nid)
                 self.send_json({"ok": ok})
                 return
+            # 前缀匹配但 ID 不是数字：原来会继续往下走、最后撞成 405
+            # （method not allowed），语义误导。这里明确报 400。
+            self.send_json({"ok": False, "error": "无效的通知 ID"}, 400)
+            return
 
         # ── API: iLink — status ────────────────────────────────────────
         if self.path == "/api/ilink/status":

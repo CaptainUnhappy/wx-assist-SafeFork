@@ -4787,10 +4787,16 @@ def _notify_assistant_scheduler(config: AssistantConfig):
 def handle_oa_groups_create(params, config: AssistantConfig):
     """POST /api/oa/groups — Create OA group"""
     try:
-        body = params.get("_body", {})
-        name = body.get("name", "")
+        body = params.get("_body") or {}
+        name = (body.get("name") or "").strip()
         accounts = body.get("accounts", [])
         cron_expr = body.get("cron_expr", "")
+
+        # 必填校验：空 body 曾经也能创建成功，留下无名空分组（实测踩到过）。
+        if not name:
+            return {"ok": False, "error": "缺少分组名称"}
+        if not isinstance(accounts, list):
+            return {"ok": False, "error": "accounts 必须是列表"}
         digest_template = body.get("digest_template", "default")
         push_target = body.get("push_target", "")
         lookback_hours = body.get("lookback_hours", 24)
