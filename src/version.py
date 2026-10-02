@@ -12,7 +12,7 @@
 
 import re
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 # ── 发布仓库（唯一正确地址，勿改成其它地址）────────────────────────
 GITHUB_REPO = "MaleleStudySpace/wx-assist"
