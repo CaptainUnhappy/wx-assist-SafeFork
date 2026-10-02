@@ -180,13 +180,12 @@ class WcdbBackend(AbstractWeChatBackend):
             )
             return
 
-        # Pre-find WeChat window
-        hwnd = self._window.find_hwnd()
-        if hwnd:
-            logger.info("WeChat window pre-detected: HWND=%s", hwnd)
-        else:
-            logger.warning("WeChat window not found — will retry on first send")
-
+        # 不在这里预查找微信窗口。
+        # 该步骤只为"提前确认发送能力"，但窗口控制器在微信最小化/隐藏时必然
+        # 找不到窗口，会每次启动都刷一条 ERROR/WARNING；而它检测时还会截图做
+        # 白屏分析，属于无谓开销。
+        # 本地读取模式不依赖窗口；真正发送时 _send_and_confirm() 会自己
+        # find_hwnd(force=True) 再找一次，所以改成惰性完全等价。
         self._running = True
         consecutive_errors = 0
 
@@ -315,12 +314,10 @@ class WcdbBackend(AbstractWeChatBackend):
         self._seed_known_ids()
         # Re-resolve groups (talker IDs may have changed)
         self._resolve_groups()
-        # Re-find WeChat window
-        hwnd = self._window.find_hwnd()
-        if hwnd:
-            logger.info("WeChat window re-detected: HWND=%s", hwnd)
-        else:
-            logger.warning("WeChat window not found after reinit")
+        # 窗口失效缓存：微信重启后旧 HWND 会失效，这里只让缓存失效，
+        # 不做实际查找（查找会在真正发送时惰性进行），避免微信最小化时
+        # 反复写无意义的告警。
+        self._window.invalidate_cache()
 
     # ── Group resolution ────────────────────────────────────────────
 
