@@ -71,7 +71,12 @@ def start_bot():
         )
         from src.bot import Bot
         bot = Bot(config)
-        if not _bot_control.register_running_thread(threading.current_thread(), owner):
+        # 这里只能用 is_owner_active 判断"构造期间是否被取消"。
+        # 不能再用 register_running_thread：上面第一次调用已把 state 由
+        # starting 置为 running，而该方法要求 state==starting，第二次必然
+        # 返回 False，导致 Bot 永远不会 run()（此前被"微信进程检测"挡在前面，
+        # 所以这个 bug 一直没暴露）。
+        if not _bot_control.is_owner_active(owner):
             logger.info("Bot auto-start cancelled before Bot.run")
             return
         bot.run()
