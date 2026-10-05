@@ -1,3 +1,6 @@
+# Copyright (c) 2026 CaptainUnhappy
+# SPDX-License-Identifier: MPL-2.0
+
 name: Safe Fork Sync
 
 on:
@@ -11,7 +14,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: safefork-sync
@@ -25,13 +28,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
+      SAFEFORK_TEMPLATE_VERSION: "2026-10-05.1"
       GH_TOKEN: ${{ github.token }}
-      SAFEFORK_DEPLOY_KEY: ${{ secrets.SAFEFORK_DEPLOY_KEY }}
       UPSTREAM_REPO: ${{ vars.SAFEFORK_UPSTREAM }}
       CONTROL_BRANCH: ${{ github.event.repository.default_branch }}
       PRIMARY_BRANCH: ${{ vars.SAFEFORK_PRIMARY_BRANCH || 'main' }}
       MIN_FILE_PERCENT: ${{ vars.SAFEFORK_MIN_FILE_PERCENT || '40' }}
       MIN_FILE_COUNT: ${{ vars.SAFEFORK_MIN_FILE_COUNT || '3' }}
+      PRESERVED_TAGS: ${{ vars.SAFEFORK_PRESERVED_TAGS }}
       DRY_RUN: ${{ inputs.dry_run || false }}
     steps:
       - name: Plan, validate, and synchronize safe Git refs
@@ -39,18 +43,25 @@ jobs:
         run: |
           set -euo pipefail
           push_dir=
+          writes=0
 
           cleanup() {
             [ -z "$push_dir" ] || rm -rf -- "$push_dir"
           }
 
-          trap cleanup EXIT
-          trap 'echo "::error::Sync did not complete. The summary lists refs already written."' ERR
-
           report() {
             printf '%s\n' "$1"
             printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
           }
+
+          fail_summary() {
+            report "::error::Sync did not complete after writing $writes ref(s); completed writes are listed above."
+          }
+
+          trap cleanup EXIT
+          trap fail_summary ERR
+
+          report "SafeFork template version: $SAFEFORK_TEMPLATE_VERSION"
 
           list_refs() {
             gh api "repos/$1/git/matching-refs/$2/" --paginate --jq '.[] | [.ref, .object.sha] | @tsv'
@@ -59,7 +70,7 @@ jobs:
           count_files() {
             gh api "repos/$1/git/trees/$2?recursive=1" --jq '
               if .truncated == false then
-                [.tree[] | select(.type == "blob" or .type == "commit")] | length
+                [.tree[] | select(.type == "blob")] | length
               else error("The recursive tree is truncated.") end'
           }
 
@@ -76,17 +87,39 @@ jobs:
             return 1
           }
 
+          require_ref_absent() {
+            local ref=$1 response
+            if response=$(gh api --include "repos/$GITHUB_REPOSITORY/git/ref/$ref" 2>&1); then
+              report "::error::Target $ref was created during planning."
+              return 1
+            fi
+            if [[ "$response" == *"HTTP 404"* ]]; then
+              return 0
+            fi
+            report "::error::Unable to verify that target $ref is absent; fail closed."
+            return 1
+          }
+
           configure_push() {
-            if [ -z "${SAFEFORK_DEPLOY_KEY:-}" ]; then
-              report "::error::Writes are planned, but repository-scoped SAFEFORK_DEPLOY_KEY is not configured."
+            if [ -z "${GH_TOKEN:-}" ]; then
+              report "::error::Writes are planned, but the repository GITHUB_TOKEN is unavailable."
               return 1
             fi
             push_dir=$(mktemp -d)
-            printf '%s\n' "$SAFEFORK_DEPLOY_KEY" > "$push_dir/key"
-            chmod 600 "$push_dir/key"
-            gh api meta --jq '.ssh_keys[] | "github.com \(.)"' > "$push_dir/known_hosts"
+            cat > "$push_dir/askpass" <<'EOF'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *Password*) printf '%s\n' "$GH_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+            chmod 700 "$push_dir/askpass"
             git -C "$push_dir" init --bare --quiet
-            export GIT_SSH_COMMAND="ssh -i $push_dir/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$push_dir/known_hosts -o StrictHostKeyChecking=yes"
+            export GIT_ASKPASS="$push_dir/askpass"
+            export GIT_ASKPASS_REQUIRE=force
+            export GIT_TERMINAL_PROMPT=0
+            report "Write transport: repository GITHUB_TOKEN; GitHub suppresses downstream push-workflow runs."
           }
 
           push_ref() {
@@ -99,7 +132,12 @@ jobs:
               report "::error::$kind/$name fetched SHA differs from the locked source SHA."
               return 1
             fi
-            git -C "$push_dir" push --quiet "git@github.com:$GITHUB_REPOSITORY.git" "$staged:refs/$kind/$name"
+            if ! git -C "$push_dir" push --quiet "https://github.com/$GITHUB_REPOSITORY.git" "$staged:refs/$kind/$name"; then
+              report "::error::Push was rejected; SafeFork will not fall back to a deploy key or PAT because those credentials can trigger inherited workflows."
+              return 1
+            fi
+            writes=$((writes + 1))
+            report "Pushed ref: $kind/$name -> $expected; verifying."
             verify_ref "$kind/$name" "$expected"
           }
 
@@ -141,6 +179,27 @@ jobs:
             sha=${sha%$'\r'}
             fork_tags["${ref#refs/tags/}"]=$sha
           done <<< "$fork_tags_raw"
+
+          # A reviewed exception preserves one exact tag object; it never moves it.
+          declare -A preserved_tags=()
+          preserved_config=${PRESERVED_TAGS:-}
+          while read -r tag expected_fork expected_upstream extra; do
+            [ -n "$tag" ] || continue
+            if [ -n "$extra" ] ||
+               ! [[ "$expected_fork" =~ ^[0-9a-f]{40}$ && "$expected_upstream" =~ ^[0-9a-f]{40}$ ]] ||
+               ! git check-ref-format "refs/tags/$tag" ||
+               [ -n "${preserved_tags[$tag]+present}" ]; then
+              report "::error::Invalid or duplicate SAFEFORK_PRESERVED_TAGS entry; expected: tag fork-sha upstream-sha."
+              exit 1
+            fi
+            if [ "${fork_tags[$tag]-}" != "$expected_fork" ] ||
+               [ "${upstream_tags[$tag]-}" != "$expected_upstream" ] ||
+               [ "$expected_fork" = "$expected_upstream" ]; then
+              report "::error::Preserved tag $tag no longer matches its reviewed SHA pair; manual review required."
+              exit 1
+            fi
+            preserved_tags["$tag"]=$expected_fork
+          done <<< "${preserved_config//$'\r'/}"
 
           if [ "${#upstream_heads[@]}" -eq 0 ]; then
             report "::error::No upstream branches were returned."
@@ -187,8 +246,23 @@ jobs:
               create_tags+=("$tag")
               report "Plan: copy immutable tag $tag -> $source_sha"
             elif [ "${fork_tags[$tag]}" != "$source_sha" ]; then
-              report "::error::Tag $tag has the same name but a different SHA; tags are immutable."
-              exit 1
+              if [ -n "${preserved_tags[$tag]+present}" ]; then
+                report "::warning::Preserved reviewed tag conflict: $tag; Fork ${fork_tags[$tag]}; upstream $source_sha."
+              else
+                report "::error::Tag $tag has the same name but a different SHA; tags are immutable."
+                exit 1
+              fi
+            fi
+          done
+
+          for branch in "${!fork_heads[@]}"; do
+            if [ "$branch" != "$CONTROL_BRANCH" ] && [ -z "${upstream_heads[$branch]+present}" ]; then
+              report "Preserved Fork-only branch: $branch -> ${fork_heads[$branch]}"
+            fi
+          done
+          for tag in "${!fork_tags[@]}"; do
+            if [ -z "${upstream_tags[$tag]+present}" ]; then
+              report "Preserved Fork-only tag: $tag -> ${fork_tags[$tag]}"
             fi
           done
 
@@ -206,10 +280,10 @@ jobs:
             exit 1
           fi
 
-          writes=0
           planned_writes=$((${#create_branches[@]} + ${#update_branches[@]} + ${#create_tags[@]}))
-          [ "$planned_writes" -eq 0 ] || configure_push
 
+          # Recheck every planned target before the first write. Ordinary pushes
+          # remain the final race-safe guard if a ref changes after this snapshot.
           for branch in "${update_branches[@]}"; do
             expected_before=${fork_heads[$branch]}
             latest=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq '.object.sha')
@@ -217,24 +291,39 @@ jobs:
               report "::error::Target branch $branch changed during planning."
               exit 1
             fi
+          done
+          for branch in "${create_branches[@]}"; do
+            require_ref_absent "heads/$branch"
+          done
+          for tag in "${create_tags[@]}"; do
+            require_ref_absent "tags/$tag"
+          done
+          for tag in "${!preserved_tags[@]}"; do
+            latest=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha')
+            if [ "$latest" != "${preserved_tags[$tag]}" ]; then
+              report "::error::Preserved tag $tag changed during planning."
+              exit 1
+            fi
+          done
+
+          [ "$planned_writes" -eq 0 ] || configure_push
+
+          for branch in "${update_branches[@]}"; do
             source_sha=${upstream_heads[$branch]}
             push_ref heads "$branch" "$source_sha"
-            writes=$((writes + 1))
             report "Fast-forwarded branch: $branch -> $source_sha"
           done
 
           for branch in "${create_branches[@]}"; do
             source_sha=${upstream_heads[$branch]}
             push_ref heads "$branch" "$source_sha"
-            writes=$((writes + 1))
             report "Created branch: $branch -> $source_sha"
           done
 
           for tag in "${create_tags[@]}"; do
             source_sha=${upstream_tags[$tag]}
             push_ref tags "$tag" "$source_sha"
-            writes=$((writes + 1))
             report "Copied tag: $tag -> $source_sha"
           done
 
-          report "Sync complete: wrote $writes refs; no merge, force update, or delete."
+          report "Sync complete: wrote $writes refs; preserved ${#preserved_tags[@]} reviewed tag conflict(s); no merge, force update, or delete."
