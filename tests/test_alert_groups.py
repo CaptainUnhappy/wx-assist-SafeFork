@@ -27,7 +27,7 @@ from src.assistant.config import (
 )
 
 LEGACY = [
-    {"chat_id": "a@chatroom", "group_name": "周先生发单群",
+    {"chat_id": "a@chatroom", "group_name": "测试发单群",
      "keywords": ["保证金", "100万"], "enabled": True, "push_target": "ilink"},
     {"chat_id": "b@chatroom", "group_name": "证券单群",
      "keywords": ["100.01"], "enabled": False, "push_target": ""},
@@ -61,14 +61,14 @@ class LegacyMigrationTest(_ConfigIsolated):
         self.assertEqual(len(cfg.alert_groups), 4)
 
         first = cfg.alert_groups[0]
-        self.assertEqual(first.name, "周先生发单群")
+        self.assertEqual(first.name, "测试发单群")
         self.assertTrue(first.id)
         self.assertEqual(first.keywords, ["保证金", "100万"])
         self.assertTrue(first.enabled)
         self.assertEqual(first.push_target, "ilink")
         self.assertEqual(
             [(c.chat_id, c.name, c.enabled) for c in first.chats],
-            [("a@chatroom", "周先生发单群", True)],
+            [("a@chatroom", "测试发单群", True)],
         )
 
         second = cfg.alert_groups[1]
@@ -110,7 +110,7 @@ class LegacyMigrationTest(_ConfigIsolated):
         cfg = config_mod.load_assistant_config()
         owners = [g.name for g in cfg.alert_groups
                   if any(c.chat_id == "a@chatroom" for c in g.chats)]
-        self.assertEqual(owners, ["周先生发单群"])
+        self.assertEqual(owners, ["测试发单群"])
 
     def test_dirty_input_never_raises(self):
         """手改配置塞脏数据只能 warning，不能让整份配置被默认值覆盖。"""

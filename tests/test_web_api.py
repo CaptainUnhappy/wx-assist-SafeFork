@@ -1369,7 +1369,7 @@ class WebSocketHelperTests(unittest.TestCase):
             "title": "🔑 关键词命中 · 捡破烂的",
             "content": json.dumps({
                 "group": "捡破烂的",
-                "sender": "马乐乐",
+                "sender": "测试用户A",
                 "keywords": ["急单"],
                 "message": "急单！谁来接",
             }, ensure_ascii=False),
@@ -1379,7 +1379,7 @@ class WebSocketHelperTests(unittest.TestCase):
             "id": "attempt-legacy", "platform": "qqbot", "channel": "qqbot",
             "status": "success", "provider_error": "", "created_at": 1,
             "source_type": "keyword_alert", "source_id": "49", "outbox_id": 0,
-            "conversation_key": "47474516850@chatroom",
+            "conversation_key": "44445555666@chatroom",
         }]
         with (
             patch("src.assistant.outbox.Outbox", return_value=outbox),
@@ -1390,7 +1390,7 @@ class WebSocketHelperTests(unittest.TestCase):
         outbox.get_notification.assert_called_once_with(49)
         record = result["records"][0]
         self.assertEqual(record["group_name"], "捡破烂的")
-        self.assertIn("马乐乐", record["content"])
+        self.assertIn("测试用户A", record["content"])
         self.assertEqual(record["outbox_id"], 49)
 
     def test_push_history_does_not_treat_platform_message_id_as_outbox_id(self):

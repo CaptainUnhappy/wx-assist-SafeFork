@@ -277,7 +277,7 @@ def get_content_cache():
 def _match_my_wxid(sender: str, my_wxid: str) -> bool:
     """比对 sender 与 my_wxid，忽略末尾 _xxx 设备/场景后缀。
 
-    例如配置 myWxid="wxid_wxeb5jtupcvz12_d3e3"，WCDB sender="wxid_wxeb5jtupcvz12"
+    例如配置 myWxid="wxid_example12345_d3e3"，WCDB sender="wxid_example12345"
     (无后缀) → 严格相等失败 → 误判非自己。剥后缀比较即可正确识别。
     """
     if not sender or not my_wxid:

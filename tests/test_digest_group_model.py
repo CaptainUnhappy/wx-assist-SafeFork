@@ -22,9 +22,9 @@ from src.assistant.config import (
 
 # 改动前从生产 data/assistant_config.json 记录的基线
 LIVE_MEMORIES = {
-    "聚沙成塔": 1495,
-    "一手行口冲量实时更新群①": 913,
-    "冲量中介群": 2000,
+    "示例群A": 1495,
+    "示例群B": 913,
+    "示例群C": 2000,
 }
 LIVE_TOTAL = 4408
 
@@ -69,13 +69,13 @@ class TestLegacyMigration(ConfigPathIsolated):
 
     def test_legacy_group_becomes_single_chat_group(self):
         self.write_raw({"digest_groups": [
-            legacy_item("聚沙成塔", "56925293326@chatroom", "记忆A")]})
+            legacy_item("示例群A", "11112222333@chatroom", "记忆A")]})
         dg = config_mod.load_assistant_config().digest_groups[0]
         self.assertRegex(dg.id, r"^dg_\d{3}$")
-        self.assertEqual(dg.name, "聚沙成塔")
+        self.assertEqual(dg.name, "示例群A")
         self.assertEqual(len(dg.chats), 1)
-        self.assertEqual(dg.chats[0].chat_id, "56925293326@chatroom")
-        self.assertEqual(dg.chats[0].name, "聚沙成塔")
+        self.assertEqual(dg.chats[0].chat_id, "11112222333@chatroom")
+        self.assertEqual(dg.chats[0].name, "示例群A")
         self.assertTrue(dg.chats[0].enabled)
         self.assertEqual(dg.memory, "记忆A")
         self.assertEqual(dg.memory_rev, 0)

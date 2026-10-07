@@ -255,11 +255,11 @@ class TestDigestFiltering(unittest.TestCase):
         """
         dg = DigestGroup(id="dg_001", name="羊毛组", memory="组里在聊淘宝新规")
         prompt = build_digest_prompt(dg, [{"sender_name": "A", "content": "hi",
-                                           "timestamp": 1700000000}], "攒单群")
-        self.assertIn("## 本次摘要的会话\n攒单群", prompt)
-        self.assertIn("## 「攒单群」最近 1 条消息", prompt)
+                                           "timestamp": 1700000000}], "示例群A")
+        self.assertIn("## 本次摘要的会话\n示例群A", prompt)
+        self.assertIn("## 「示例群A」最近 1 条消息", prompt)
         self.assertIn("分组「羊毛组」共用", prompt)
-        self.assertIn("只在与「攒单群」相关时引用", prompt)
+        self.assertIn("只在与「示例群A」相关时引用", prompt)
 
     def test_memory_update_prompt(self):
         prompt = generate_memory_update_prompt("旧记忆", "新摘要内容")

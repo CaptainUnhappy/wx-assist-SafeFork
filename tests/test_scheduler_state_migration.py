@@ -18,10 +18,10 @@ from src.assistant import scheduler as sched_mod
 from src.assistant.config import AssistantConfig, DigestChat, DigestGroup
 from src.assistant.scheduler import DigestScheduler, _migrate_state_keys
 
-CHAT = "56925293326@chatroom"
+CHAT = "11112222333@chatroom"
 
 
-def make_cfg(cron="0 21 * * *", gid="dg_001", name="聚沙成塔", chat_id=CHAT):
+def make_cfg(cron="0 21 * * *", gid="dg_001", name="示例群A", chat_id=CHAT):
     return AssistantConfig(
         assistant_enabled=True,
         digest_groups=[DigestGroup(
@@ -43,14 +43,14 @@ class TestMigrateStateKeysPure(unittest.TestCase):
 
     def test_falls_back_to_group_name(self):
         """agent 工具建的旧组没有 chat_id，state 里存的是群名。"""
-        state = {"聚沙成塔": 2000.0}
+        state = {"示例群A": 2000.0}
         out, changed = _migrate_state_keys(state, make_cfg(chat_id=""))
         self.assertTrue(changed)
         self.assertEqual(out["dg:dg_001"], 2000.0)
 
     def test_takes_max_when_several_legacy_keys_match(self):
         """取最近一次：拿更早的时间戳会误判成"错过了"而补触发。"""
-        state = {CHAT: 1000.0, "聚沙成塔": 3000.0}
+        state = {CHAT: 1000.0, "示例群A": 3000.0}
         out, _ = _migrate_state_keys(state, make_cfg())
         self.assertEqual(out["dg:dg_001"], 3000.0)
 

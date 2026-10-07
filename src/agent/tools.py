@@ -216,7 +216,7 @@ class ToolExecutor:
                 "properties": {
                     "group_name": {
                         "type": "string",
-                        "description": "分组名称或群聊名称，例如'聚沙成塔'、'项目群'",
+                        "description": "分组名称或群聊名称，例如'示例群A'、'项目群'",
                     },
                     "hours": {
                         "type": "integer",

@@ -188,8 +188,8 @@ class TestSingleChatPath(PipelineBase):
     def test_single_prompt_names_the_chat(self):
         """single 也必须点名会话 —— 这里曾经保证"与改造前逐字节一致"，现在故意放弃。
 
-        分组可能配了 5 个会话而本轮只有 1 个有新消息：生产上 dg_001「聚沙成塔」
-        就是这样，outbox 记着 digest_mode=single、chats=["509助力"]，正文里
+        分组可能配了 5 个会话而本轮只有 1 个有新消息：生产上 dg_001「示例群A」
+        就是这样，outbox 记着 digest_mode=single、chats=["示例群D"]，正文里
         没有任何会话名。这份无法归属的正文接着被写进**全组共用**的记忆，
         下一轮又当上下文喂给另外 4 个会话。
         """

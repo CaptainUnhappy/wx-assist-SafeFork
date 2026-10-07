@@ -324,7 +324,7 @@ class WcdbBackend(AbstractWeChatBackend):
     def _resolve_groups(self) -> None:
         """Map configured group names to talker IDs from WCDB sessions.
 
-        WCDB session records only contain usernames (e.g. 20968749111@chatroom).
+        WCDB session records only contain usernames (e.g. 12345678901@chatroom).
         Display names must be resolved via the DLL's get_display_names() or
         the local nickname cache (WeChat contacts / manual overrides).
         """
