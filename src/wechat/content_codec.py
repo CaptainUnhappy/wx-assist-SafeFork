@@ -8,6 +8,9 @@
 - WEBUI 会话管理（api_handlers）在读取 WCDB 时解压
 - 入库链路（wcdb_backend._standardize）在写入 messages.db 前解压，
   保证本地缓存表里存的是清晰可读文本
+
+入库链路在解压后还会调用 msg_text.clean_message_content() 把 XML 消息体
+（引用/聊天记录/链接/图片…）转成可读文本，规则见 wechat/msg_text.py。
 """
 
 import logging

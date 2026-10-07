@@ -672,12 +672,23 @@ class WcdbBackend(AbstractWeChatBackend):
             resolved_content = re.sub(r'^[a-zA-Z0-9_@.\-]+:\r?\n', '', resolved_content, count=1)
 
         # Generate stable message ID
+        # 注意：必须用**清洗前**的 content 计算兜底哈希。清洗会改变文本，
+        # 用清洗后的内容算会让没有 server_id/local_id 的消息算出新 ID，
+        # 与历史行对不上、去重失效、重复入库。
         raw_id = (
             str(msg.get("server_id", ""))
             or str(msg.get("local_id", ""))
             or f"{sender}|{content}|{ts}"
         )
         msg_id = hashlib.md5(str(raw_id).encode()).hexdigest()
+
+        # 入库前把 XML 负载（引用回复/聊天记录/链接/图片/名片/位置/邮件/通话…）
+        # 压成可读文本：messages.db 存的就是"清洗后的数据"，下游（关键词告警 /
+        # 摘要 / RAG / 记忆）不必各自再解析 XML。规则见 wechat/msg_text.py；
+        # 非 XML 内容原样保留，解压失败/未知 XML 也不会把原始 XML 写回库里。
+        local_type = msg.get("localType", msg.get("msg_type", 1))
+        from .msg_text import clean_message_content
+        resolved_content = clean_message_content(resolved_content, local_type)
 
         return {
             "message_id": msg_id,
@@ -686,7 +697,7 @@ class WcdbBackend(AbstractWeChatBackend):
             "sender_id": str(sender),
             "sender_name": str(sender_name),
             "content": resolved_content,
-            "msg_type": int(msg.get("localType", msg.get("msg_type", 1))),
+            "msg_type": int(local_type),
             "timestamp": ts,
             "is_group": True,
         }
