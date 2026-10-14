@@ -174,6 +174,10 @@ a = Analysis(
     'src.wechat.sns_client', 'src.wechat.wcdb_sns_reader',
     'src.utils.web_search', 'src.utils.op_logger', 'src.utils.cron',
     'src.trigger', 'src.router',
+    # ── 语音通话助手（edge-tts 走 aiohttp，PyInstaller 自带 aiohttp hook）──
+    'src.voice', 'src.voice.providers', 'src.voice.realtime_relay',
+    'src.voice.volc_relay', 'src.voice.call_logger',
+    'edge_tts', 'aiohttp', 'websockets',
     # ── 第三方动态导入 ──
     'lark_oapi', 'lark_oapi.ws', 'lark_oapi.event',
     ],

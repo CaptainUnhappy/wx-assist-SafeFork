@@ -1,13 +1,14 @@
-﻿import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Warning, Eye, EyeSlash, X } from '@phosphor-icons/react'
 
 // ── Shared constants ──────────────────────────────────────────────
 export const API_BASE = ''
 
-/** Build a WebSocket URL for the current origin (works in dev, desktop, and LAN). */
+/** Build a WebSocket URL for the current origin (works in dev, desktop, LAN, and HTTPS/WSS 外网). */
 export function getWsUrl(path = '/ws') {
-  return `ws://${window.location.host}${path}`
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${scheme}//${window.location.host}${path}`
 }
 
 export const spring = { type: 'spring', stiffness: 200, damping: 25 }
@@ -67,7 +68,7 @@ export function Toggle({ enabled, onChange, title }) {
   )
 }
 
-export function Select({ value, onChange, options }) {
+export function Select({ value, onChange, options, variant = 'row' }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
 
@@ -78,6 +79,10 @@ export function Select({ value, onChange, options }) {
   }, [])
 
   const selected = options.find(o => o.value === value)
+  const stack = variant === 'stack'
+  const label = selected ? (stack ? (selected.desc || selected.value)
+                                  : `${selected.value}  ·  ${selected.desc}`)
+                          : value
 
   return (
     <div ref={ref} className="relative">
@@ -89,7 +94,7 @@ export function Select({ value, onChange, options }) {
                    transition-all duration-200 cursor-pointer text-left
                    hover:border-text-muted/30 dark:hover:border-text-muted/40"
       >
-        {selected ? `${selected.value}  ·  ${selected.desc}` : value}
+        {label}
       </button>
       <span
         className="absolute right-5 top-1/2 pointer-events-none select-none text-text-muted text-lg font-mono transition-all duration-200"
@@ -100,25 +105,52 @@ export function Select({ value, onChange, options }) {
         <motion.div
           initial={{ opacity: 0, y: -4 }}
           animate={{ opacity: 1, y: 0 }}
-          className="absolute z-50 left-0 right-0 mt-1.5 bg-bg-card border border-border-main rounded-2xl shadow-xl overflow-hidden max-h-[280px] overflow-y-auto"
+          className="absolute z-50 left-0 right-0 mt-1.5 bg-bg-card border border-border-main rounded-2xl shadow-xl overflow-hidden max-h-[320px] overflow-y-auto"
         >
-          {options.map(opt => (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => { onChange(opt.value); setOpen(false) }}
-              className={`w-full text-left px-5 py-2.5 text-[14px] transition-colors flex items-center gap-3 font-mono cursor-pointer
-                ${value === opt.value ? 'bg-brand-green-light text-brand-green-hover dark:text-brand-green font-semibold' : 'text-text-main hover:bg-bg-raised'}`}
-            >
-              <span className="w-[72px] shrink-0 font-semibold">{opt.value}</span>
-              <span className="w-[4px] shrink-0 opacity-40 text-text-muted">·</span>
-              <span className={opt.hint ? 'w-[80px] shrink-0' : ''}>{opt.desc}</span>
-              {opt.hint && (<>
+          {options.map(opt => {
+            if (stack) {
+              // 长 ID 场景：上行主描述，下行小字技术 ID（自动截断，不挤压不重叠）
+              const active = value === opt.value
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => { onChange(opt.value); setOpen(false) }}
+                  className={`w-full text-left px-4 py-2.5 cursor-pointer transition-colors block
+                    ${active ? 'bg-brand-green-light' : 'hover:bg-bg-raised'}`}
+                >
+                  <div className={`text-[13.5px] leading-5 ${active
+                    ? 'text-brand-green-hover dark:text-brand-green font-semibold'
+                    : 'text-text-main'}`}>
+                    {opt.desc || opt.value}
+                  </div>
+                  {opt.desc && (
+                    <div className={`mt-0.5 text-[11px] font-mono truncate ${
+                      active ? 'text-brand-green/70' : 'text-text-muted'}`}>
+                      {opt.value}
+                    </div>
+                  )}
+                </button>
+              )
+            }
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => { onChange(opt.value); setOpen(false) }}
+                className={`w-full text-left px-5 py-2.5 text-[14px] transition-colors flex items-center gap-3 font-mono cursor-pointer
+                  ${value === opt.value ? 'bg-brand-green-light text-brand-green-hover dark:text-brand-green font-semibold' : 'text-text-main hover:bg-bg-raised'}`}
+              >
+                <span className="w-[72px] shrink-0 font-semibold">{opt.value}</span>
                 <span className="w-[4px] shrink-0 opacity-40 text-text-muted">·</span>
-                <span className="text-text-muted truncate">{opt.hint}</span>
-              </>)}
-            </button>
-          ))}
+                <span className={opt.hint ? 'w-[80px] shrink-0' : ''}>{opt.desc}</span>
+                {opt.hint && (<>
+                  <span className="w-[4px] shrink-0 opacity-40 text-text-muted">·</span>
+                  <span className="text-text-muted truncate">{opt.hint}</span>
+                </>)}
+              </button>
+            )
+          })}
         </motion.div>
       )}
     </div>

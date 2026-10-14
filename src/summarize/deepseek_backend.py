@@ -389,6 +389,96 @@ class OpenAICompatSummarizer(AbstractSummarizer):
 
         return content, tool_calls, reasoning
 
+    def agent_chat_stream(self, system_prompt: str,
+                          messages: list[dict],
+                          tools: list[dict]):
+        """流式 Agent 对话（语音助手）。
+
+        与 agent_chat 同参数，但以 stream=True 调用：
+        - delta.content 实时以 ("delta", text) 事件 yield；
+        - delta.tool_calls 分片累积（id / function.name / function.arguments
+          都可能跨 chunk 到达）；
+        - 最后 yield ("done", {content, tool_calls, reasoning})。
+
+        工具调用轮模型通常不输出 content；若个别模型既输出文本又请求工具，
+        engine 层会以 tool_calls 为准并丢弃本轮 delta。
+        """
+        api_messages = [{"role": "system", "content": system_prompt}] + messages
+        params = self._merge_params(
+            {"model": self.model, "max_tokens": 4096,
+             "messages": api_messages,
+             "tools": tools, "tool_choice": "auto",
+             "stream": True},
+            self.extra_body,
+        )
+
+        start = time.monotonic()
+        try:
+            stream = self._retry_with_backoff(
+                lambda: self.client.chat.completions.create(**params),
+                "agent chat stream",
+            )
+        except Exception:
+            logger.info("[LLM] agent_chat_stream create FAILED after %.1fms",
+                        (time.monotonic() - start) * 1000)
+            raise
+
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        # index → 累积中的 tool_call（arguments 是分片字符串，结束后拼接）
+        tool_acc: dict[int, dict] = {}
+
+        try:
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                reasoning_piece = getattr(delta, "reasoning_content", None)
+                if reasoning_piece:
+                    reasoning_parts.append(reasoning_piece)
+
+                if delta.content:
+                    content_parts.append(delta.content)
+                    yield ("delta", delta.content)
+
+                pieces = getattr(delta, "tool_calls", None)
+                if pieces:
+                    for piece in pieces:
+                        idx = getattr(piece, "index", 0) or 0
+                        slot = tool_acc.setdefault(idx, {
+                            "id": "", "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        })
+                        if getattr(piece, "id", None):
+                            slot["id"] = piece.id
+                        fn = getattr(piece, "function", None)
+                        if fn is not None:
+                            if getattr(fn, "name", None):
+                                slot["function"]["name"] += fn.name
+                            if getattr(fn, "arguments", None):
+                                slot["function"]["arguments"] += fn.arguments
+        except Exception:
+            logger.info("[LLM] agent_chat_stream iteration FAILED after %.1fms",
+                        (time.monotonic() - start) * 1000)
+            raise
+
+        tool_calls = None
+        if tool_acc:
+            tool_calls = [tool_acc[i] for i in sorted(tool_acc.keys())]
+
+        result = {
+            "content": "".join(content_parts),
+            "tool_calls": tool_calls,
+            "reasoning": "".join(reasoning_parts),
+        }
+        logger.info(
+            "[LLM] agent_chat_stream done in %.1fms (content=%d chars, tools=%d)",
+            (time.monotonic() - start) * 1000,
+            len(result["content"]), len(tool_calls) if tool_calls else 0,
+        )
+        yield ("done", result)
+
     # ── Memory consolidation ───────────────────────────────────────
 
     def consolidate_memory(self, existing_memory: str,

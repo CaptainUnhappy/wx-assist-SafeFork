@@ -1,10 +1,11 @@
-﻿import { useState, useRef, useEffect } from 'react'
+﻿﻿﻿﻿import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle, Warning, FloppyDisk, Info, CircleNotch, MagnifyingGlass, Lightning, PaperPlaneTilt, QrCode, SignOut, TestTube, ChatCircle, Trash, CaretDown, CaretRight, X, Brain, ArrowsClockwise, DownloadSimple, Rocket, ArrowSquareOut } from '@phosphor-icons/react'
 import { QRCodeSVG } from 'qrcode.react'
 import { spring, Field, Toggle, Select, Input, API_BASE, getWsUrl } from './SharedComponents'
 import ChatDrawer from './ChatDrawer'
 import PlatformConfigDemo from './PlatformConfigDemo'
+import VoiceSection from './VoiceSection'
 
 const pageTransition = {
   initial: { opacity: 0, x: 12 },
@@ -867,8 +868,8 @@ function GeneralSection({ form, update, updateInfo, onCheckUpdate }) {
   )
 }
 
-const sectionTitles = { ai: 'AI 后端配置', identity: '聊天范围', data: '数据配置', push: '消息推送', general: '通用', sandbox: 'AI 调试台' }
-const sectionAccents = { ai: 'var(--brand-green)', identity: 'var(--status-info)', data: 'var(--brand-green)', push: 'var(--brand-green)', general: 'var(--status-info)', sandbox: 'var(--color-purple-500, #8b5cf6)' }
+const sectionTitles = { ai: 'AI 后端配置', identity: '聊天范围', data: '数据配置', push: '消息推送', voice: '语音通话', general: '通用', sandbox: 'AI 调试台' }
+const sectionAccents = { ai: 'var(--brand-green)', identity: 'var(--status-info)', data: 'var(--brand-green)', push: 'var(--brand-green)', voice: 'var(--brand-green)', general: 'var(--status-info)', sandbox: 'var(--color-purple-500, #8b5cf6)' }
 
 // ── Credentials Section (连接凭证配置) ─────────────────────────────────
 
@@ -2855,6 +2856,7 @@ export default function ConfigPanel({ activeSection, onNavigate, updateInfo, onC
                   </div>
                 )}
                 {activeSection === 'push' && <PushPlatformView />}
+                {activeSection === 'voice' && <VoiceSection />}
                 {activeSection === 'general' && (
                   <GeneralSection
                     form={form}
@@ -2869,7 +2871,7 @@ export default function ConfigPanel({ activeSection, onNavigate, updateInfo, onC
         </AnimatePresence>
       </div>
 
-      {activeSection !== 'push' && activeSection !== 'general' && (
+      {activeSection !== 'push' && activeSection !== 'general' && activeSection !== 'voice' && (
         <>
           <div className="mt-8 flex flex-col sm:flex-row items-center gap-4">
             <motion.button

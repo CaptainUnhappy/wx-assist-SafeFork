@@ -1222,8 +1222,33 @@ def _send_ws_frame(sock, text):
     sock.sendall(bytes(frame))
 
 
+def _send_ws_binary(sock, data: bytes) -> None:
+    """Send a WebSocket BINARY frame (used by the voice realtime relay for PCM)."""
+    frame = bytearray()
+    frame.append(0x82)  # FIN + binary opcode
+    if len(data) < 126:
+        frame.append(len(data))
+    elif len(data) < 65536:
+        frame.append(126)
+        frame.extend(struct.pack(">H", len(data)))
+    else:
+        frame.append(127)
+        frame.extend(struct.pack(">Q", len(data)))
+    frame.extend(data)
+    sock.sendall(bytes(frame))
+
+
 def _read_ws_frame(sock):
-    """Read a WebSocket frame (handles TCP fragmentation)."""
+    """Read a WebSocket frame (handles TCP fragmentation). Returns payload bytes."""
+    result = _read_ws_frame_ex(sock)
+    return None if result is None else result[1]
+
+
+def _read_ws_frame_ex(sock):
+    """Read a WebSocket frame, returning (opcode, payload) or None on close/error.
+
+    opcode: 0x1 text, 0x2 binary, 0x0 continuation. Ping auto-answered (returns b"").
+    """
     header = _recv_exactly(sock, 2)
     if header is None:
         return None
@@ -1234,7 +1259,7 @@ def _read_ws_frame(sock):
         # Send pong
         pong = bytearray([0x8A, 0x00])  # FIN + pong opcode, no payload
         sock.sendall(bytes(pong))
-        return b""  # return empty to keep reading
+        return (0x9, b"")  # ping marker — caller keeps reading
     length = header[1] & 0x7F
     if length == 126:
         ext = _recv_exactly(sock, 2)
@@ -1255,7 +1280,7 @@ def _read_ws_frame(sock):
     payload = bytearray(payload)
     for i in range(len(payload)):
         payload[i] ^= mask[i % 4]
-    return bytes(payload)
+    return (opcode, bytes(payload))
 
 
 def _handle_ws_upgrade(headers, conn):
@@ -1552,6 +1577,11 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/ilink/test-push",
                          "/api/wechat-data-dir/detect",
                          "/api/agent/test",
+                         "/api/voice/stt",
+                         "/api/voice/chat/stream",
+                         "/api/voice/reset",
+                         "/api/voice/realtime/config",
+                         "/api/voice/realtime/test",
                          "/api/skills/sample",
                          "/api/platforms",
                          "/webhook/feishu") or (
@@ -1627,6 +1657,14 @@ class _UIHandler(SimpleHTTPRequestHandler):
             return
 
         client_ip = self.client_address[0]
+        # 反向隧道（公网 nginx → frps → frpc 本机回连）对后端表现为 127.0.0.1，
+        # 若直接放行会导致外网手机绕过配对鉴权。仅当 TCP 对端确为回环、且带
+        # X-Real-IP（由我们自己的 nginx proxy_set_header 强制覆写，客户端无法伪造）
+        # 时，才以真实远端 IP 为准，继续走下面的非本机鉴权。
+        if client_ip in ("127.0.0.1", "::1"):
+            real_ip = (self.headers.get("X-Real-IP", "") or "").strip()
+            if real_ip and real_ip not in ("127.0.0.1", "::1"):
+                client_ip = real_ip
         if self.path.startswith("/?lan=") and self.command == "GET":
             token = self.path.split("=", 1)[1]
             session = _lan_auth.connect_device(token, client_ip)
@@ -1691,6 +1729,18 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     self.end_headers()
                     return
 
+        # ── Voice Realtime WebSocket（全双工中继）────────────────────
+        if self.path.split("?")[0] == "/ws/voice":
+            connection_header = self.headers.get("Connection", "").lower()
+            upgrade_header = self.headers.get("Upgrade", "").lower()
+            if "upgrade" in connection_header and upgrade_header == "websocket":
+                if _handle_ws_upgrade(self.headers, self.request):
+                    self._handle_voice_realtime_socket()
+                    return
+                self.send_response(400)
+                self.end_headers()
+                return
+
         # ── LAN control API ────────────────────────────────────────────
         if self.path == "/api/lan/status":
             self.send_json(_lan_auth.status)
@@ -1749,6 +1799,274 @@ class _UIHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 logger.warning("[AGENT-TEST] 执行失败: %s", e)
                 self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Voice Companion ─────────────────────────────────────
+
+        # GET /api/voice/config — 语音能力状态（前端决定 STT 通道）
+        if self.path.split("?")[0] == "/api/voice/config" and self.command == "GET":
+            try:
+                from src.voice.providers import voice_status
+                self.send_json(voice_status())
+            except Exception as e:
+                logger.warning("[VOICE] config failed: %s", e)
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # GET /api/voice/realtime/config — 语音配置总览（总开关 + B档千问/火山 + A档，不回传完整 Key）
+        if self.path.split("?")[0] == "/api/voice/realtime/config" and self.command == "GET":
+            try:
+                from src.config import load_config
+                from src.voice.realtime_relay import realtime_configured
+                from src.voice.volc_relay import volc_configured, VOLC_VOICES
+                cfg = load_config()
+                qwen_key = getattr(cfg, "voice_realtime_api_key", "") or ""
+                volc_key = getattr(cfg, "voice_volc_api_key", "") or ""
+                provider = (getattr(cfg, "voice_rt_provider", "qwen") or "qwen").lower()
+                qwen_ready = realtime_configured()
+                volc_ready = volc_configured()
+                self.send_json({
+                    "ok": True,
+                    # 总开关
+                    "voice_enabled": getattr(cfg, "voice_assistant_enabled", True),
+                    # B 档服务商与当前可用性（enabled=当前所选通道是否就绪）
+                    "rt_provider": provider,
+                    "enabled": volc_ready if provider == "volc" else qwen_ready,
+                    # 千问
+                    "qwen_enabled": bool(getattr(cfg, "voice_realtime_enabled", False)),
+                    "qwen_ready": qwen_ready,
+                    "has_key": bool(qwen_key),
+                    "key_hint": (qwen_key[:4] + "…" + qwen_key[-4:]) if len(qwen_key) >= 10 else "",
+                    "model": cfg.voice_realtime_model,
+                    "voice": cfg.voice_realtime_voice,
+                    "turn_mode": cfg.voice_realtime_turn_mode,
+                    # 火山
+                    "volc_enabled": bool(getattr(cfg, "voice_volc_enabled", False)),
+                    "volc_ready": volc_ready,
+                    "volc_has_key": bool(volc_key),
+                    "volc_key_hint": (volc_key[:4] + "…" + volc_key[-4:]) if len(volc_key) >= 10 else "",
+                    "volc_voice": cfg.voice_volc_voice,
+                    "volc_voices": [{"value": v["id"], "desc": v["name"]} for v in VOLC_VOICES],
+                    # A 档
+                    "standard_enabled": getattr(cfg, "voice_standard_enabled", True),
+                    "stt_provider": getattr(cfg, "voice_stt_provider", "browser"),
+                    "stt_base_url": cfg.voice_stt_base_url,
+                    "stt_has_key": bool(cfg.voice_stt_api_key),
+                    "stt_model": cfg.voice_stt_model,
+                    "tts_provider": cfg.voice_tts_provider,
+                    "tts_base_url": cfg.voice_tts_base_url,
+                    "tts_has_key": bool(cfg.voice_tts_api_key),
+                    "tts_model": cfg.voice_tts_model,
+                    "tts_voice": cfg.voice_tts_voice,
+                    "tts_qwen_model": cfg.voice_tts_qwen_model,
+                    "tts_qwen_voice": cfg.voice_tts_qwen_voice,
+                })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # POST /api/voice/realtime/config — 保存语音配置（总开关/A档/B档一次提交）
+        if self.path == "/api/voice/realtime/config" and self.command == "POST":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                from src.config import write_env_atomic, find_env_file
+
+                def s(key, default):
+                    return str(body.get(key) or default).strip()
+
+                # 根据模型家族给出合法默认音色（omni=Tina，audio=longanqian）
+                model = s("model", "qwen3.8-omni-flash-realtime")
+                voice = s("voice", "Tina" if "omni" in model else "longanqian_v3.1")
+
+                updates = {
+                    "VOICE_ENABLED": str(bool(body.get("voice_enabled", True))).lower(),
+                    # B 档服务商
+                    "VOICE_RT_PROVIDER": s("rt_provider", "qwen"),
+                    # B 档 · 千问
+                    "VOICE_REALTIME_ENABLED":
+                        str(bool(body.get("qwen_enabled", body.get("enabled", False)))).lower(),
+                    "VOICE_REALTIME_MODEL": model,
+                    "VOICE_REALTIME_VOICE": voice,
+                    "VOICE_REALTIME_TURN_MODE": s("turn_mode", "smart_turn"),
+                    # B 档 · 火山
+                    "VOICE_VOLC_ENABLED":
+                        str(bool(body.get("volc_enabled", False))).lower(),
+                    "VOICE_VOLC_VOICE":
+                        s("volc_voice", "zh_female_vv_uranus_bigtts"),
+                    # A 档
+                    "VOICE_STANDARD_ENABLED":
+                        str(bool(body.get("standard_enabled", True))).lower(),
+                    "VOICE_STT_PROVIDER": s("stt_provider", "browser"),
+                    "VOICE_STT_BASE_URL": s("stt_base_url", ""),
+                    "VOICE_STT_MODEL": s("stt_model", "whisper-1"),
+                    "VOICE_TTS_PROVIDER": s("tts_provider", "edge"),
+                    "VOICE_TTS_BASE_URL": s("tts_base_url", ""),
+                    "VOICE_TTS_MODEL": s("tts_model", "tts-1"),
+                    "VOICE_TTS_VOICE": s("tts_voice", "zh-CN-XiaoxiaoNeural"),
+                    "VOICE_TTS_QWEN_MODEL":
+                        s("tts_qwen_model", "qwen3-tts-flash-realtime"),
+                    "VOICE_TTS_QWEN_VOICE": s("tts_qwen_voice", "Cherry"),
+                }
+                # 各类 Key：留空/占位时不覆盖
+                for body_key, env_key in (
+                    ("api_key", "VOICE_REALTIME_API_KEY"),
+                    ("volc_api_key", "VOICE_VOLC_API_KEY"),
+                    ("stt_api_key", "VOICE_STT_API_KEY"),
+                    ("tts_api_key", "VOICE_TTS_API_KEY"),
+                ):
+                    val = (body.get(body_key) or "").strip()
+                    if val and val != "********":
+                        updates[env_key] = val
+                env_path = find_env_file()
+                write_env_atomic(env_path, updates)
+                for k, v in updates.items():
+                    os.environ[k] = str(v)
+                self.send_json({"ok": True})
+            except Exception as e:
+                logger.exception("[VOICE] save voice config failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # POST /api/voice/realtime/test — 测试 Key 是否可连通（建连即关）
+        if self.path == "/api/voice/realtime/test" and self.command == "POST":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                result = self._test_realtime_connection(body)
+                self.send_json(result)
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # POST /api/voice/reset — 清空语音会话历史
+        if self.path == "/api/voice/reset" and self.command == "POST":
+            try:
+                if _agent_engine is not None:
+                    _agent_engine.clear_conversation("voice")
+                self.send_json({"ok": True})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # POST /api/voice/stt — raw audio body → text（云端 OpenAI 兼容 STT）
+        if self.path.split("?")[0] == "/api/voice/stt" and self.command == "POST":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0:
+                    self.send_json({"ok": False, "error": "没有收到音频数据"}, 400)
+                    return
+                if length > 25 * 1024 * 1024:
+                    self.send_json({"ok": False, "error": "音频过大（>25MB）"}, 413)
+                    return
+                audio = self.rfile.read(length)
+                ctype = self.headers.get("Content-Type", "audio/webm")
+                ext = "wav" if "wav" in ctype else ("webm" if "webm" in ctype else
+                      ("mpeg" in ctype or "mp3" in ctype) and "mp3" or "webm")
+                filename = f"audio.{ext}"
+                from src.voice.providers import transcribe
+                stt_t0 = time.monotonic()
+                result = transcribe(audio, content_type=ctype, filename=filename)
+                if result.get("ok"):
+                    logger.info("[VOICE-A] stt ok in %.0fms bytes=%d text=%s",
+                                (time.monotonic() - stt_t0) * 1000, len(audio),
+                                str(result.get("text", ""))[:100])
+                else:
+                    logger.warning("[VOICE-A] stt rejected: %s", result.get("error"))
+                self.send_json(result, 200 if result.get("ok") else 503)
+            except Exception as e:
+                logger.warning("[VOICE] stt failed: %s", e)
+                self.send_json({"ok": False, "error": str(e)}, 500)
+            return
+
+        # GET /api/voice/tts?text=...&voice=... — 文字转语音
+        if self.path.split("?")[0] == "/api/voice/tts" and self.command == "GET":
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            text = (qs.get("text", [""])[0] or "").strip()
+            voice = qs.get("voice", [""])[0] or ""
+            if not text:
+                self.send_json({"ok": False, "error": "缺少 text 参数"}, 400)
+                return
+            try:
+                from src.voice.providers import synthesize
+                audio, audio_type = synthesize(text[:1000], voice=voice)
+                self.send_response(200)
+                self.send_header("Content-Type", audio_type)
+                self.send_header("Content-Length", str(len(audio)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(audio)
+            except Exception as e:
+                logger.warning("[VOICE] tts failed: %s", e)
+                try:
+                    self.send_json({"ok": False, "error": str(e)}, 500)
+                except Exception:
+                    pass
+            return
+
+        # POST /api/voice/chat/stream — 语音对话 SSE（token流/工具进度/可取消）
+        if self.path == "/api/voice/chat/stream" and self.command == "POST":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length)) if length else {}
+            except Exception:
+                body = {}
+            message = (body.get("message", "") or "").strip()
+            if message:
+                logger.info("[VOICE-A] chat request: %s", message[:100])
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            # SSE 是一次性流式响应：最后一帧发出后由服务端关闭连接，
+            # 避免 HTTP/1.0 keep-alive 下连接空挂占用线程。
+            self.close_connection = True
+
+            def _voice_sse(event: str, data: dict) -> bool:
+                try:
+                    payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                    self.wfile.write(payload.encode("utf-8"))
+                    self.wfile.flush()
+                    return True
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    return False
+                except Exception:
+                    return False
+
+            if not message:
+                _voice_sse("error", {"message": "message 不能为空"})
+                return
+            if _agent_engine is None:
+                _voice_sse("error", {"message": "Agent 未就绪，请先在「运行状态」页启动机器人"})
+                return
+
+            cancel_event = threading.Event()
+            try:
+                gen = _agent_engine.run_stream(
+                    message, conversation_key="voice",
+                    cancel_event=cancel_event,
+                )
+                for ev in gen:
+                    if cancel_event.is_set():
+                        break
+                    etype = ev.get("type", "")
+                    if not _voice_sse(etype, ev):
+                        # 客户端断开（barge-in abort / 挂断）：通知引擎尽快停
+                        cancel_event.set()
+                        try:
+                            gen.close()
+                        except Exception:
+                            pass
+                        return
+            except Exception as e:
+                logger.exception("[VOICE] chat stream failed")
+                _voice_sse("error", {"message": f"语音对话失败：{e}"})
             return
 
         # ── API: Load config ───────────────────────────────────────────
@@ -4687,6 +5005,218 @@ class _UIHandler(SimpleHTTPRequestHandler):
             for code in ["error", "exception", "400", "401", "403", "404", "405", "500"]
         ):
             logger.warning("HTTP %s", format % args)
+
+    def _test_realtime_connection(self, body: dict) -> dict:
+        """用临时事件循环建一次 realtime 握手验证 Key/模型，连上即关。"""
+        import asyncio
+        import websockets
+
+        provider = (body.get("provider") or "").strip().lower()
+        if not provider:
+            from src.config import load_config as _lc
+            provider = (getattr(_lc(), "voice_rt_provider", "qwen") or "qwen").lower()
+        if provider == "volc":
+            return self._test_volc_connection(body)
+
+        from src.voice.realtime_relay import REALTIME_WSS
+
+        api_key = (body.get("api_key") or "").strip()
+        if not api_key or api_key == "********":
+            from src.config import load_config
+            api_key = load_config().voice_realtime_api_key
+        model = (body.get("model") or "qwen-audio-3.1-realtime-plus").strip()
+        if not api_key:
+            return {"ok": False, "error": "请先填写 API Key"}
+
+        async def _probe():
+            url = f"{REALTIME_WSS}?model={model}"
+            async with websockets.connect(
+                url,
+                additional_headers={"Authorization": f"Bearer {api_key}"},
+                open_timeout=10, close_timeout=5,
+            ) as ws:
+                msg = await asyncio.wait_for(ws.recv(), timeout=10)
+                return msg
+
+        try:
+            raw = asyncio.run(_probe())
+            evt = json.loads(raw)
+            if evt.get("type") == "session.created":
+                return {"ok": True, "message": "连接成功，实时语音可用"}
+            return {"ok": False, "error": f"服务端返回异常事件：{evt.get('type')}"}
+        except Exception as e:
+            msg = str(e)
+            # 401/403 归类为 Key 问题，便于前端提示
+            if "401" in msg or "403" in msg or "Handshake" in msg:
+                return {"ok": False, "error": f"鉴权失败，请检查 API Key（{msg[:120]}）"}
+            return {"ok": False, "error": f"连接失败：{msg[:160]}"}
+
+    def _test_volc_connection(self, body: dict) -> dict:
+        """火山 Seeduplex：X-Api-Key 建连 → 发最小 session.create → 等 session.created。"""
+        import asyncio
+        import websockets
+        from src.voice.volc_relay import VOLC_WSS, VOLC_MODEL, VOLC_VOICES
+
+        api_key = (body.get("volc_api_key") or body.get("api_key") or "").strip()
+        if not api_key or api_key == "********":
+            from src.config import load_config
+            api_key = getattr(load_config(), "voice_volc_api_key", "")
+        voice = (body.get("volc_voice") or VOLC_VOICES[0]["id"]).strip()
+        if not api_key:
+            return {"ok": False, "error": "请先填写火山 API Key"}
+
+        async def _probe():
+            async with websockets.connect(
+                VOLC_WSS,
+                additional_headers={"X-Api-Key": api_key},
+                open_timeout=10, close_timeout=5,
+            ) as ws:
+                await ws.send(json.dumps({
+                    "type": "session.create",
+                    "session": {
+                        "model": VOLC_MODEL,
+                        "audio": {
+                            "input": {"format": {"type": "pcm", "rate": 16000}},
+                            "output": {
+                                "format": {"type": "pcm_s16le", "rate": 24000},
+                                "voice": voice,
+                            },
+                        },
+                    },
+                }))
+                # 读到 session.created 或 error
+                for _ in range(3):
+                    msg = await asyncio.wait_for(ws.recv(), timeout=10)
+                    evt = json.loads(msg)
+                    if evt.get("type") == "session.created":
+                        return evt
+                    if evt.get("type") == "error":
+                        return evt
+                return {"type": "timeout"}
+
+        try:
+            evt = asyncio.run(_probe())
+            if evt.get("type") == "session.created":
+                return {"ok": True, "message": "连接成功，火山豆包全双工可用"}
+            if evt.get("type") == "error":
+                return {"ok": False,
+                        "error": f"火山返回错误：{json.dumps(evt.get('error', evt), ensure_ascii=False)[:160]}"}
+            return {"ok": False, "error": "火山服务未返回 session.created"}
+        except Exception as e:
+            msg = str(e)
+            if "401" in msg or "403" in msg or "Handshake" in msg:
+                return {"ok": False, "error": f"鉴权失败，请检查火山 API Key（{msg[:120]}）"}
+            return {"ok": False, "error": f"连接失败：{msg[:160]}"}
+
+    def _handle_voice_realtime_socket(self) -> None:
+        """浏览器 ↔ 实时语音服务商（千问 / 火山 Seeduplex）的全双工 WS 中继。
+
+        握手已完成。本方法阻塞在浏览器读循环，直到任一端断开。
+        二进制帧 = 上行 PCM16/16k 麦克风；文本帧 = JSON 控制。
+        下行由中继线程经 browser_send 推回（二进制=24k PCM，文本=JSON）。
+        """
+        from src.config import load_config as _load_cfg
+        from src.voice.realtime_relay import RealtimeRelay, realtime_configured
+        from src.voice.volc_relay import VolcRelay, volc_configured
+
+        ws_t0 = time.monotonic()
+        cfg = _load_cfg()
+        provider = (getattr(cfg, "voice_rt_provider", "qwen") or "qwen").lower()
+        if provider == "volc":
+            available = volc_configured()
+        else:
+            provider = "qwen"
+            available = realtime_configured()
+
+        if not available:
+            # 未启用/未配置：给出具体原因（开关 or Key），写日志后通知前端回退 A 档
+            if provider == "volc":
+                if not getattr(cfg, "voice_volc_enabled", False):
+                    reason, hint = "disabled", "火山实时语音开关未开启"
+                elif not getattr(cfg, "voice_volc_api_key", ""):
+                    reason, hint = "no_key", "火山 API Key 未配置"
+                else:
+                    reason, hint = "not_ready", "火山实时语音未就绪"
+            else:
+                if not getattr(cfg, "voice_realtime_enabled", False):
+                    reason, hint = "disabled", "千问实时语音开关未开启"
+                elif not getattr(cfg, "voice_realtime_api_key", ""):
+                    reason, hint = "no_key", "千问 API Key 未配置"
+                else:
+                    reason, hint = "not_ready", "千问实时语音未就绪"
+            logger.warning("[VOICE-WS] provider=%s unavailable reason=%s → fallback standard mode",
+                           provider, reason)
+            try:
+                _send_ws_frame(self.request, json.dumps({
+                    "type": "realtime.unavailable",
+                    "message": f"{hint}，使用标准语音模式",
+                }, ensure_ascii=False))
+            except Exception:
+                pass
+            return
+
+        from src.voice.call_logger import new_call_id
+        sid = new_call_id()
+        logger.info("[VOICE-WS] open sid=%s provider=%s", sid, provider)
+
+        # 取 Agent 工具注册表（MCP 包装层也可能）；Agent 未启动则为 None，
+        # 此时纯语音对话仍可用，只是不能查本地数据。
+        registry = None
+        if _agent_engine is not None:
+            try:
+                registry = _agent_engine._tools.registry
+            except Exception:
+                registry = None
+
+        conn = self.request
+        closed = {"v": False}
+        send_lock = threading.Lock()
+
+        def browser_send(payload) -> None:
+            if closed["v"]:
+                return
+            try:
+                with send_lock:
+                    if isinstance(payload, bytes):
+                        _send_ws_binary(conn, payload)
+                    else:
+                        _send_ws_frame(conn, str(payload))
+            except Exception:
+                closed["v"] = True
+
+        def browser_closed() -> bool:
+            return closed["v"]
+
+        if provider == "volc":
+            relay = VolcRelay(browser_send, browser_closed,
+                              registry=registry, session_id=sid)
+        else:
+            relay = RealtimeRelay(browser_send, browser_closed,
+                                  registry=registry, session_id=sid)
+        relay.start()
+
+        try:
+            while True:
+                frame = _read_ws_frame_ex(conn)
+                if frame is None:
+                    break
+                opcode, payload = frame
+                if opcode == 0x9:  # ping 已自动回 pong
+                    continue
+                if not payload:
+                    continue
+                if opcode == 0x2:  # binary: 上行麦克风 PCM
+                    relay.send_audio(payload)
+                elif opcode == 0x1:  # text: 控制 JSON
+                    relay.send_text(payload.decode("utf-8", errors="ignore"))
+        except Exception:
+            logger.warning("[VOICE-WS] sid=%s browser socket error provider=%s duration=%.1fs",
+                           sid, provider, time.monotonic() - ws_t0, exc_info=True)
+        finally:
+            logger.info("[VOICE-WS] closed sid=%s provider=%s duration=%.1fs",
+                        sid, provider, time.monotonic() - ws_t0)
+            closed["v"] = True
+            relay.close()
 
     def send_json(self, obj, status_code=200):
         """Send a JSON response with configurable HTTP status code.

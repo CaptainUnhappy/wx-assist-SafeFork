@@ -329,6 +329,49 @@ class Outbox:
                 return True
             return False
 
+    def list_by_timerange(self, date_from: str = "", date_to: str = "",
+                          notif_type: str = "", keyword: str = "",
+                          limit: int = 50) -> list[dict]:
+        """按时间范围查询推送给用户的通知（语音助手"总结昨天的内容"用）。
+
+        与 list_push_history 不同：不要求记录有 push_channel，只要产生过
+        推送记录就查得到。
+
+        Args:
+            date_from: 起始日期/时间字符串（created_at 字典序比较，
+                        格式 "YYYY-MM-DD" 或 "YYYY-MM-DDTHH:MM:SS"）。
+            date_to:   结束日期（含当天，自动补到 23:59:59）。
+            notif_type: 可选类型过滤。
+            keyword:   可选关键词（匹配 title 或 content，LIKE）。
+            limit:     最多返回条数（1~200）。
+        """
+        where = []
+        params: list[object] = []
+        if date_from:
+            where.append("created_at >= ?")
+            params.append(date_from)
+        if date_to:
+            # 纯日期补全到当天结束；带时间的原样使用
+            cutoff = date_to + "T23:59:59" if len(date_to) == 10 else date_to
+            where.append("created_at <= ?")
+            params.append(cutoff)
+        if notif_type:
+            where.append("type = ?")
+            params.append(notif_type)
+        if keyword:
+            where.append("(title LIKE ? OR content LIKE ?)")
+            like = f"%{keyword}%"
+            params.extend([like, like])
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        params.append(max(1, min(int(limit or 50), 200)))
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM assistant_outbox{clause} "
+                f"ORDER BY created_at ASC LIMIT ?",
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def list_push_history(self, notif_type: str = "", push_status: str = "",
                           limit: int = 50, offset: int = 0,
                           date_from: str = "", date_to: str = "") -> list[dict]:

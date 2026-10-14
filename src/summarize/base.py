@@ -363,6 +363,30 @@ class AbstractSummarizer(ABC):
         """
         ...
 
+    def agent_chat_stream(self, system_prompt: str,
+                          messages: list[dict],
+                          tools: list[dict]):
+        """流式版 agent_chat（语音助手用）。
+
+        生成器，依次 yield 事件元组：
+        - ("delta", text): 最终回复的文本增量（工具调用轮一般无 delta）
+        - ("done", {"content", "tool_calls", "reasoning"}): 本轮结束，
+          与 agent_chat 的三元组同义。
+
+        默认实现为非流式降级：直接调 agent_chat，把完整回复一次性 yield。
+        支持流式 tool calling 的后端（如 DeepSeek/OpenAI 兼容端）覆写本方法。
+        """
+        content, tool_calls, reasoning = self.agent_chat(
+            system_prompt, messages, tools,
+        )
+        if content and not tool_calls:
+            yield ("delta", content)
+        yield ("done", {
+            "content": content or "",
+            "tool_calls": tool_calls,
+            "reasoning": reasoning or "",
+        })
+
     # ── Abstract methods ──────────────────────────────────────────
 
     @abstractmethod

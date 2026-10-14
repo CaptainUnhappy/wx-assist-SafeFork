@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ArrowDown, Trash, MagnifyingGlass, CaretRight, CaretDown } from '@phosphor-icons/react'
 import { API_BASE } from './SharedComponents'
@@ -9,10 +9,12 @@ const LEVEL_STYLES = {
   WARNING: { color: 'var(--status-warn)', bg: 'var(--status-warn-soft)' },
   ERROR:   { color: 'var(--status-error)', bg: 'var(--status-error-soft)' },
 }
-const LEVEL_LABELS = { ALL: '全部', LLM: 'LLM', OP: '操作', AGENT: 'Agent', INFO: 'INFO', WARNING: '警告', ERROR: '错误', DEBUG: 'DEBUG' }
-const FILTER_OPTIONS = ['ALL', 'OP', 'LLM', 'AGENT', 'INFO', 'WARNING', 'ERROR', 'DEBUG']
+const LEVEL_LABELS = { ALL: '全部', LLM: 'LLM', VOICE: '语音', OP: '操作', AGENT: 'Agent', INFO: 'INFO', WARNING: '警告', ERROR: '错误', DEBUG: 'DEBUG' }
+const FILTER_OPTIONS = ['ALL', 'OP', 'LLM', 'VOICE', 'AGENT', 'INFO', 'WARNING', 'ERROR', 'DEBUG']
 
 // Operation tags that appear in [TAG] format — used for filtering and highlighting
+// 注意：VOICE-* 标签不属于“操作”分类（只在「全部/语音/级别」过滤中呈现），
+// 其着色由下方 TAG_STYLES 单独提供，故不放进 OP_TAGS。
 const OP_TAGS = [
   'BOOT', 'KEY-EXTRACT', 'DB', 'HOOK',
   'MSG-POLL', 'MSG-RECV', 'MSG-DEDUP', 'SEND', 'SEND-FAIL',
@@ -41,6 +43,119 @@ const TAG_STYLES = {
   'WND':         { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.12)' },
   'Agent':       { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.12)' },
   'RAG':         { color: '#34d399', bg: 'rgba(52, 211, 153, 0.12)' },
+  'VOICE-CALL':  { color: '#34d399', bg: 'rgba(52, 211, 153, 0.12)' },
+  'VOICE-WS':    { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.12)' },
+  'VOICE-RT':    { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.12)' },
+  'VOICE-VOLC':  { color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.12)' },
+  'VOICE-A':     { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.12)' },
+}
+
+// ── 语音通话日志归组 ─────────────────────────────────────────────────
+// 同时兼容散点行 sid=voice_... 与 DETAIL JSON 中的 "sid": "voice_..."
+const VOICE_SID_RE = /(?:sid=|"sid":\s*")(voice_\d{8}_\d{6}_\d{4})/
+const VOICE_PREFIX_RE = /^\[VOICE-[A-Z]+\]/
+const VOICE_CONTENT_RE = /(user >>|assistant <<|function_call)/
+
+// 解析 [VOICE-CALL] 行的 key=value 字段
+function parseVoiceCallKv(msg) {
+  const out = {}
+  const re = /(\w+)=(\S+)/g
+  let m
+  while ((m = re.exec(msg)) !== null) out[m[1]] = m[2]
+  const em = /\serror=(.*)$/.exec(msg)
+  if (em) out.error = em[1]
+  return out
+}
+
+// 从全部日志行中按 sid 归组通话卡片（不受当前过滤条件影响，保证卡片完整）
+function groupVoiceCalls(logs) {
+  const cards = new Map() // sid 保持插入顺序
+  const ensure = (sid) => {
+    let c = cards.get(sid)
+    if (!c) {
+      c = {
+        sid, provider: '', voice: '', model: '',
+        open: null, close: null,
+        details: [], frame: [], content: [],
+        levels: new Set(), searchText: '',
+      }
+      cards.set(sid, c)
+    }
+    return c
+  }
+  const ingestText = (c, t) => { c.searchText += ` ${t || ''}` }
+
+  for (const log of logs) {
+    const msg = log.msg || ''
+    if (!msg.startsWith('[VOICE-')) continue
+    const sidM = VOICE_SID_RE.exec(msg)
+    const sid = sidM ? sidM[1] : null
+
+    // DETAIL JSON：解析后进对应卡片（孤立 detail 丢弃，不单独渲染）
+    if (msg.startsWith('[VOICE-DETAIL] ')) {
+      if (!sid) continue
+      try {
+        const d = JSON.parse(msg.slice('[VOICE-DETAIL] '.length))
+        const c = ensure(sid)
+        c.details.push(d)
+        c.levels.add(log.level || 'INFO')
+        ingestText(c, msg)
+        if (!c.provider && d.provider) c.provider = d.provider
+      } catch { /* 畸形 JSON 忽略 */ }
+      continue
+    }
+
+    // 无 sid 的语音行（如配置不可用、A 档散点）不归组
+    if (!sid) continue
+
+    const c = ensure(sid)
+    c.levels.add(log.level || 'INFO')
+    ingestText(c, msg)
+
+    if (msg.startsWith('[VOICE-CALL] ')) {
+      const kv = parseVoiceCallKv(msg)
+      if (msg.includes(' OPEN ')) {
+        c.open = { log, kv }
+        c.provider = kv.provider || c.provider
+        c.voice = kv.voice && kv.voice !== '-' ? kv.voice : c.voice
+        c.model = kv.model && kv.model !== '-' ? kv.model : c.model
+      } else if (msg.includes(' CLOSED ')) {
+        c.close = { log, kv }
+      }
+    } else if (VOICE_CONTENT_RE.test(msg)) {
+      c.content.push(log)
+    } else {
+      c.frame.push(log)
+    }
+  }
+  return cards
+}
+
+// 卡片是否通过当前过滤/搜索条件
+function voiceCardMatches(card, filter, searchQuery) {
+  switch (filter) {
+    // 通话卡片不属于这些既有分类，避免改变其原有过滤结果
+    case 'LLM':
+    case 'AGENT':
+    case 'OP':
+      return false
+    case 'INFO':
+    case 'WARNING':
+    case 'ERROR':
+    case 'DEBUG': {
+      // 卡片内最高级别命中即保留（ERROR > WARNING > INFO）
+      if (filter === 'ERROR') return card.levels.has('ERROR')
+      if (filter === 'WARNING') return card.levels.has('WARNING') || card.levels.has('ERROR')
+      if (filter === 'DEBUG') return card.levels.has('DEBUG')
+      return true // INFO
+    }
+    default: // ALL / OP / VOICE
+      break
+  }
+  if (searchQuery) {
+    return card.searchText.toLowerCase().includes(searchQuery.toLowerCase())
+  }
+  return true
 }
 
 function renderHighlightedMsg(msg) {
@@ -54,9 +169,9 @@ function renderHighlightedMsg(msg) {
       {parts.map((part, i) => {
         if (!part) return null
         if (part.startsWith('[') && part.endsWith(']')) {
-          // Check if this is an operation tag (e.g. [SEND], [MSG-POLL])
+          // Check if this is an operation/voice tag with a custom color
           const tagContent = part.slice(1, -1)
-          if (OP_TAGS.includes(tagContent)) {
+          if (OP_TAGS.includes(tagContent) || TAG_STYLES[tagContent]) {
             const style = TAG_STYLES[tagContent] || { color: '#6366f1', bg: 'rgba(99, 102, 241, 0.12)' }
             return (
               <span key={i} className="px-1.5 py-0.5 rounded-full border text-xs font-semibold font-mono mx-0.5"
@@ -258,6 +373,215 @@ function LLMLogEntry({ log, expanded, onToggle }) {
   )
 }
 
+// ── Voice Call Log Entry (按 sid 归组的通话卡片) ─────────────────────
+
+const PROVIDER_LABEL_CN = { volc: '火山豆包', qwen: '千问' }
+const CALL_STATUS = {
+  ok:        { text: '已结束', cls: 'text-emerald-400' },
+  downgrade: { text: '已降级', cls: 'text-amber-400' },
+  failed:    { text: '失败',   cls: 'text-red-400' },
+}
+
+function VoiceToolBlock({ tool }) {
+  const [open, setOpen] = useState(false)
+  const hasBody = !!(tool.args || tool.result)
+  return (
+    <div className="ml-5 rounded-lg border border-sky-500/20 bg-sky-500/5 px-2.5 py-1.5 text-xs">
+      <button
+        onClick={() => hasBody && setOpen(!open)}
+        className={`flex w-full items-center gap-2 text-left ${hasBody ? 'cursor-pointer hover:text-sky-300' : 'cursor-default'}`}
+      >
+        {hasBody
+          ? (open ? <CaretDown size={10} weight="fill" className="text-sky-400" />
+                  : <CaretRight size={10} weight="fill" className="text-sky-400" />)
+          : <span className="inline-block w-[10px]" />}
+        <span className="rounded bg-sky-500/15 px-1.5 py-0.5 font-mono text-[11px] text-sky-300 border border-sky-500/20">
+          {tool.name}
+        </span>
+        {typeof tool.ms === 'number' && (
+          <span className="rounded bg-bg-main/60 px-1.5 py-0.5 font-mono text-[10px] text-text-muted border border-border-main">
+            {tool.ms >= 1000 ? `${(tool.ms / 1000).toFixed(1)}s` : `${Math.round(tool.ms)}ms`}
+          </span>
+        )}
+      </button>
+      <AnimatePresence>
+        {open && hasBody && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.15 }}
+            className="overflow-hidden"
+          >
+            {tool.args && (
+              <div className="mt-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">参数</div>
+                <pre className="mt-0.5 whitespace-pre-wrap break-all rounded bg-black/25 p-1.5 font-mono text-[11px] text-text-secondary">{tool.args}</pre>
+              </div>
+            )}
+            {tool.result && (
+              <div className="mt-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">返回预览</div>
+                <pre className="mt-0.5 max-h-32 overflow-y-auto whitespace-pre-wrap break-all rounded bg-black/25 p-1.5 font-mono text-[11px] text-text-secondary">{tool.result}</pre>
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function VoiceTurn({ detail }) {
+  return (
+    <div className="space-y-1.5 border-l-2 border-emerald-500/25 pl-3">
+      <div className="flex items-center gap-2">
+        <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-mono text-emerald-300 border border-emerald-500/25">
+          第 {detail.turn} 轮
+        </span>
+        {detail.interrupted && (
+          <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-300 border border-amber-500/25">
+            中断/未答完
+          </span>
+        )}
+        {typeof detail.latency_ms === 'number' && (
+          <span className="text-[10px] font-mono text-text-muted">
+            {detail.latency_ms >= 1000 ? `${(detail.latency_ms / 1000).toFixed(1)}s` : `${Math.round(detail.latency_ms)}ms`}
+          </span>
+        )}
+      </div>
+      {detail.user && (
+        <div className="text-xs leading-relaxed">
+          <span className="mr-1 font-semibold text-emerald-400">你 ›</span>
+          <span className="text-text-main select-all">{detail.user}</span>
+        </div>
+      )}
+      {detail.tools?.length > 0 && (
+        <div className="space-y-1">
+          {detail.tools.map((t, i) => <VoiceToolBlock key={i} tool={t} />)}
+        </div>
+      )}
+      {detail.assistant && (
+        <div className="text-xs leading-relaxed">
+          <span className="mr-1 font-semibold text-teal-300">答 ‹</span>
+          <span className="text-text-main select-all">{detail.assistant}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function VoiceCallEntry({ card, expanded, onToggle }) {
+  const closeKv = card.close?.kv
+  const status = closeKv?.status ? CALL_STATUS[closeKv.status] : null
+  const ts = card.open?.log?.ts || card.frame[0]?.ts || card.close?.log?.ts || ''
+  const pName = PROVIDER_LABEL_CN[card.provider] || card.provider || '实时语音'
+  const duration = closeKv?.duration ? `${closeKv.duration}s` : null
+  const turns = closeKv?.turns != null ? `${closeKv.turns}轮` : (card.details.length ? `${card.details.length}轮` : null)
+  const level = card.levels.has('ERROR') ? 'ERROR' : card.levels.has('WARNING') ? 'WARNING' : 'INFO'
+  // 旧日志兼容：没有 DETAIL 行时直接展示内容散点
+  const legacyContent = card.details.length === 0 ? card.content : []
+
+  return (
+    <div className="flex flex-col">
+      <div
+        className="flex items-center gap-4 px-4 py-2 hover:bg-bg-main/50 dark:hover:bg-white/5 transition-colors border-0 cursor-pointer"
+        onClick={onToggle}
+      >
+        <span className="text-text-muted shrink-0 text-xs font-mono" style={{ width: 70 }}>{ts.slice(11)}</span>
+        <span
+          className="shrink-0 font-bold rounded-full text-center text-xs tracking-wider inline-flex items-center justify-center border font-mono uppercase"
+          style={{
+            width: 68, height: 20,
+            color: LEVEL_STYLES[level]?.color || '#888888',
+            backgroundColor: LEVEL_STYLES[level]?.bg || 'var(--bg-main)',
+            borderColor: LEVEL_STYLES[level]?.color ? `${LEVEL_STYLES[level].color}25` : 'var(--border-main)',
+          }}
+        >
+          VOICE
+        </span>
+        <span className="text-text-main break-all select-all font-mono flex-1 text-xs">
+          <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 mr-1.5 text-emerald-400 border border-emerald-500/20 font-semibold not-italic">
+            通话 · {pName}
+          </span>
+          {card.voice && card.voice !== '-' && (
+            <span className="text-text-secondary">{card.voice} </span>
+          )}
+          {duration && <span className="text-text-muted">· {duration} </span>}
+          {turns && <span className="text-text-muted">· {turns} </span>}
+          {status
+            ? <span className={`font-semibold ${status.cls}`}>· {status.text}</span>
+            : <span className="text-sky-400 font-semibold">· 进行中…</span>}
+        </span>
+        <span className="shrink-0 text-text-muted hover:text-emerald-400 transition-colors">
+          {expanded ? <CaretDown size={14} weight="fill" /> : <CaretRight size={14} weight="fill" />}
+        </span>
+      </div>
+
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="ml-[70px] mr-4 mb-2 p-3 bg-emerald-500/5 dark:bg-emerald-500/10 border border-emerald-500/15 rounded-xl space-y-3">
+              {/* 元信息徽章条 */}
+              <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+                <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">{pName}</span>
+                {card.voice && card.voice !== '-' && (
+                  <span className="px-1.5 py-0.5 rounded bg-bg-main/60 text-text-secondary border border-border-main">{card.voice}</span>
+                )}
+                {card.model && card.model !== '-' && (
+                  <span className="px-1.5 py-0.5 rounded bg-bg-main/60 text-text-secondary border border-border-main">{card.model}</span>
+                )}
+                {duration && <span className="px-1.5 py-0.5 rounded bg-bg-main/60 border border-border-main">{duration}</span>}
+                {closeKv?.by && <span className="px-1.5 py-0.5 rounded bg-bg-main/60 border border-border-main">{closeKv.by}</span>}
+                <span className="px-1.5 py-0.5 rounded bg-bg-main/60 border border-border-main">{card.details.length} 轮记录</span>
+              </div>
+
+              {closeKv?.error && (
+                <div className="rounded-lg border border-red-500/25 bg-red-500/10 px-2.5 py-1.5 text-xs text-red-300 break-all">
+                  异常：{closeKv.error}
+                </div>
+              )}
+
+              {/* 轮次（结构化） */}
+              {card.details.length > 0 && (
+                <div className="space-y-3">
+                  {card.details.map((d, i) => <VoiceTurn key={i} detail={d} />)}
+                </div>
+              )}
+
+              {/* 旧日志兜底：无 DETAIL 时显示内容散点 */}
+              {legacyContent.length > 0 && (
+                <div className="space-y-1">
+                  {legacyContent.map((l, i) => (
+                    <div key={i} className="text-xs font-mono text-text-secondary">
+                      <span className="text-text-muted mr-2">{l.ts?.slice(11)}</span>
+                      {renderHighlightedMsg(l.msg)}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* 框架事件时间线 */}
+              {card.frame.length > 0 && (
+                <div className="space-y-1 border-t border-emerald-500/10 pt-2">
+                  {card.frame.map((l, i) => (
+                    <div key={i} className="text-[11px] font-mono text-text-muted">
+                      <span className="mr-2 opacity-70">{l.ts?.slice(11)}</span>
+                      {renderHighlightedMsg(l.msg)}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 // ── Main LogViewer Component ────────────────────────────────────────
 
 export default function LogViewer() {
@@ -266,6 +590,7 @@ export default function LogViewer() {
   const [logs, setLogs] = useState([])
   const [clearedManually, setClearedManually] = useState(false)
   const [expandedLLM, setExpandedLLM] = useState({})
+  const [expandedVoice, setExpandedVoice] = useState({})
   const scrollRef = useRef(null)
   const seenRef = useRef(new Set())
   const [autoScroll, setAutoScroll] = useState(true)
@@ -333,37 +658,62 @@ export default function LogViewer() {
     }
   }, [logs, autoScroll])
 
-  // Filter + merge LLM-DETAIL into LLM summary entries
+  // 过滤普通日志（LLM 摘要/详情合并、语音按 sid 归组为通话卡片）
   const processed = (() => {
-    // First apply level + search filter
-    const baseFiltered = logs.filter(l => {
-      const matchesLevel = filter === 'ALL'
-        ? true
-        : filter === 'LLM'
-          ? (l.isLLMSummary || l.isLLMDetail)
-          : filter === 'AGENT'
-            ? (l.msg?.startsWith('[Agent]'))
-            : filter === 'OP'
-              ? OP_TAG_REGEX.test(l.msg || '')
-              : l.level === filter
-      const matchesSearch = !searchQuery ||
-        l.msg?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        l.ts?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        l.level?.toLowerCase().includes(searchQuery.toLowerCase())
-      return matchesLevel && matchesSearch
-    })
+    const q = searchQuery.toLowerCase()
+    // 语音卡片从"全部日志"归组，保证一通通话的轮次不被过滤条件截断
+    const voiceCards = groupVoiceCalls(logs)
+    const placedSids = new Set()
 
-    // Merge [LLM-DETAIL] into preceding [LLM] summary entry
+    const matchNormal = (l) => {
+      const msg = l.msg || ''
+      let matchesLevel
+      if (filter === 'ALL') matchesLevel = true
+      else if (filter === 'LLM') matchesLevel = l.isLLMSummary || l.isLLMDetail
+      else if (filter === 'VOICE') matchesLevel = msg.startsWith('[VOICE-')
+      else if (filter === 'AGENT') matchesLevel = msg.startsWith('[Agent]')
+      else if (filter === 'OP') matchesLevel = OP_TAG_REGEX.test(msg)
+      else matchesLevel = l.level === filter
+      const matchesSearch = !q ||
+        msg.toLowerCase().includes(q) ||
+        l.ts?.toLowerCase().includes(q) ||
+        l.level?.toLowerCase().includes(q)
+      return matchesLevel && matchesSearch
+    }
+
     const result = []
-    for (const log of baseFiltered) {
-      if (log.isLLMDetail && result.length > 0) {
+    for (const l of logs) {
+      const msg = l.msg || ''
+
+      // ① 语音行：带 sid 的一律由通话卡片承载（DETAIL 只入卡片）
+      if (msg.startsWith('[VOICE-')) {
+        const sidM = VOICE_SID_RE.exec(msg)
+        const sid = sidM ? sidM[1] : null
+        if (sid) {
+          if (!placedSids.has(sid)) {
+            placedSids.add(sid)
+            const card = voiceCards.get(sid)
+            if (card && voiceCardMatches(card, filter, searchQuery)) {
+              result.push({ _voiceCard: card })
+            }
+          }
+          continue
+        }
+        // 无 sid 的语音散点（A 档、配置不可用）→ 普通行
+        if (matchNormal(l)) result.push(l)
+        continue
+      }
+
+      // ② LLM 详情合并到前一条摘要（保持原逻辑）
+      if (!matchNormal(l)) continue
+      if (l.isLLMDetail && result.length > 0) {
         const prev = result[result.length - 1]
         if (prev.isLLMSummary) {
-          prev.llmDetail = log.llmDetail
-          continue  // skip standalone detail line
+          prev.llmDetail = l.llmDetail
+          continue
         }
       }
-      result.push(log)
+      result.push(l)
     }
     return result
   })()
@@ -380,7 +730,9 @@ export default function LogViewer() {
                 filter === level
                   ? level === 'LLM'
                     ? 'bg-purple-500/15 text-purple-400 font-semibold shadow-sm'
-                    : 'bg-bg-raised text-text-main font-semibold shadow-sm'
+                    : level === 'VOICE'
+                      ? 'bg-emerald-500/15 text-emerald-400 font-semibold shadow-sm'
+                      : 'bg-bg-raised text-text-main font-semibold shadow-sm'
                   : 'text-text-muted hover:text-text-main'
               }`}
             >
@@ -417,7 +769,7 @@ export default function LogViewer() {
           <button onClick={scrollToBottom} title="滚动到底部" className="p-2 rounded-full text-text-muted hover:text-text-main hover:bg-bg-raised transition-colors cursor-pointer border border-transparent hover:border-border-main">
             <ArrowDown size={16} />
           </button>
-          <button onClick={() => { setLogs([]); seenRef.current.clear(); setClearedManually(true); setExpandedLLM({}) }} title="仅清空屏幕展示日志（不删除后台日志文件）" className="p-2 rounded-full text-text-muted hover:text-status-error hover:bg-status-error-soft border border-transparent hover:border-status-error/20 transition-colors cursor-pointer">
+          <button onClick={() => { setLogs([]); seenRef.current.clear(); setClearedManually(true); setExpandedLLM({}); setExpandedVoice({}) }} title="仅清空屏幕展示日志（不删除后台日志文件）" className="p-2 rounded-full text-text-muted hover:text-status-error hover:bg-status-error-soft border border-transparent hover:border-status-error/20 transition-colors cursor-pointer">
             <Trash size={16} />
           </button>
         </div>
@@ -444,11 +796,23 @@ export default function LogViewer() {
           )
         ) : (
           processed.map((log, i) => {
+            // 语音通话卡片（按 sid 归组）
+            if (log._voiceCard) {
+              const sid = log._voiceCard.sid
+              return (
+                <VoiceCallEntry
+                  key={`vc-${sid}`}
+                  card={log._voiceCard}
+                  expanded={!!expandedVoice[sid]}
+                  onToggle={() => setExpandedVoice(prev => ({ ...prev, [sid]: !prev[sid] }))}
+                />
+              )
+            }
             // LLM entries with detail — render as collapsible
             if (log.isLLMSummary) {
               return (
                 <LLMLogEntry
-                  key={i}
+                  key={`llm-${i}`}
                   log={log}
                   expanded={!!expandedLLM[i]}
                   onToggle={() => setExpandedLLM(prev => ({ ...prev, [i]: !prev[i] }))}

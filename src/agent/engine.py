@@ -198,6 +198,288 @@ class AgentEngine:
         logger.info("[Agent] run_once — prompt='%s'", prompt[:80])
         return self._react_loop(system, messages)
 
+    # ── Streaming execution (for Voice Companion) ─────────────────────
+
+    def clear_conversation(self, conversation_key: str = "voice") -> None:
+        """清空指定会话的短期历史和待确认状态（语音"重新开始"用）。"""
+        key = conversation_key or "default"
+        with self._state_lock:
+            self._histories.pop(key, None)
+            self._pending_confirms.pop(key, None)
+            self._bypass_confirms.discard(key)
+        logger.info("[Agent] Cleared conversation: %s", key)
+
+    def run_stream(self, user_message: str, *,
+                   conversation_key: str = "voice",
+                   cancel_event=None):
+        """流式 ReAct 循环（语音助手专用）。
+
+        生成器，yield 事件 dict：
+        - {"type":"token","content": str}        最终回复的文本增量
+        - {"type":"tool_start","name": str}       即将调用工具
+        - {"type":"tool_done","name": str,"preview": str} 工具返回摘要
+        - {"type":"confirm","question": str}      写操作需用户语音确认
+        - {"type":"final","content": str}         本轮最终回复
+        - {"type":"cancelled"}                    被 barge-in 取消
+        - {"type":"error","message": str}         失败
+
+        与 run() 共享同一套短期历史 / 长期记忆 / 确认状态机，
+        但使用独立 conversation_key（默认 "voice"），与微信私聊互不串上下文。
+
+        Args:
+            cancel_event: threading.Event，set 后尽快终止（barge-in 用）。
+        """
+        key = conversation_key or "voice"
+        # 注意：不能在这里 `with conversation_lock: return generator`——
+        # with 会在 return（生成器对象创建）时立即释放，迭代根本还没开始。
+        # 锁在 _run_stream_conversation 的生成器体内 acquire/release。
+        return self._run_stream_conversation(user_message, key, cancel_event)
+
+    def _run_stream_conversation(self, user_message: str, key: str,
+                                 cancel_event):
+        """实际生成器。
+
+        RLock 必须在迭代线程内获取/释放（整个迭代都在同一个 HTTP 线程）。
+        非阻塞获取：上一轮还没结束（barge-in 的 cancel 传到后端有延迟）时
+        快速失败，由前端决定忽略还是重试。
+        """
+        conversation_lock = self._conversation_locks.setdefault(key, threading.RLock())
+        acquired = conversation_lock.acquire(blocking=False)
+        if not acquired:
+            yield {"type": "error",
+                   "message": "上一轮对话还在处理中，请稍等一下再说"}
+            return
+        try:
+            yield from self._stream_inner(user_message, key, cancel_event)
+        finally:
+            conversation_lock.release()
+
+    def _stream_inner(self, user_message: str, key: str, cancel_event):
+        # ── 待确认状态：语音回答"确定/取消"走非流式确认状态机 ──
+        with self._state_lock:
+            has_pending = key in self._pending_confirms
+
+        if has_pending:
+            reply = self._handle_confirm_response(
+                user_message,
+                [{"role": "user", "content": user_message}],
+                source_platform="voice",
+                conversation_key=key,
+            )
+            # _handle_confirm_response 可能返回追问（未清 pending），
+            # 也可能已执行完动作进入新一轮 ReAct；两种情况回复都直接播
+            with self._state_lock:
+                history = self._histories.setdefault(key, [])
+                history.append((user_message, reply))
+                history_size = len(history)
+            if history_size >= MEMORY_HISTORY_LIMIT:
+                # 后台总结，避免最后一帧之后多卡几秒
+                threading.Thread(
+                    target=self._consolidate_memory, args=(key,),
+                    daemon=True,
+                ).start()
+            yield {"type": "final", "content": reply}
+            return
+
+        # ── 构建带短期历史的消息序列 ──
+        messages: list[dict] = []
+        with self._state_lock:
+            history = self._histories.setdefault(key, [])
+            history_snapshot = list(history[-MEMORY_HISTORY_LIMIT:])
+        for u, a in history_snapshot:
+            messages.append({"role": "user", "content": u})
+            messages.append({"role": "assistant", "content": a})
+        messages.append({"role": "user", "content": user_message})
+
+        system = self._build_system_prompt(conversation_key=key)
+        system += self._voice_system_suffix()
+
+        reply = None
+        try:
+            for ev in self._react_loop_stream(system, messages, key, cancel_event):
+                t = ev.get("type")
+                if t == "final":
+                    reply = ev.get("content", "")
+                yield ev
+                if t == "cancelled":
+                    return
+        except Exception as e:
+            logger.exception("[Agent] run_stream failed")
+            yield {"type": "error", "message": f"AI 调用失败：{e}"}
+            return
+
+        # ── 落短期历史（被取消的半轮回覆不保存，避免污染上下文）──
+        if reply:
+            with self._state_lock:
+                history = self._histories.setdefault(key, [])
+                history.append((user_message, reply))
+                history_size = len(history)
+            if history_size >= MEMORY_HISTORY_LIMIT:
+                # 后台总结，避免阻塞 SSE 收尾
+                threading.Thread(
+                    target=self._consolidate_memory, args=(key,),
+                    daemon=True,
+                ).start()
+
+    @staticmethod
+    def _voice_system_suffix() -> str:
+        """语音场景的 system prompt 补充：当前时间 + 口语化风格约束。"""
+        weekday_cn = "一二三四五六日"[time.localtime().tm_wday]
+        now_str = time.strftime("%Y年%m月%d日（周" + weekday_cn + "）%H:%M",
+                                time.localtime())
+        return f"""
+
+## 当前时间
+{now_str}
+
+## 语音对话风格（用户正在用打电话的方式与你交流）
+- 用口语化、自然、简洁的中文回答，先给结论再补充，像真人通话一样
+- 禁止使用 Markdown 表格、代码块、标题符号(#)、星号(**)和长编号列表；
+  需要分点时用"第一、第二"或"首先、另外"这种口语表达
+- 单次回答尽量控制在 300 字以内；信息量大时先说最重要的，
+  用户会继续追问，不要一次把所有细节倒完
+- 提到日期用相对说法（今天、昨天、本周），不要念"2026-10-14"这种格式
+- 查询类问题优先调用 query_my_feed 等工具拿到事实再回答，禁止编造"""
+
+    def _react_loop_stream(self, system: str, messages: list[dict],
+                           conversation_key: str, cancel_event):
+        """流式 ReAct 主循环。yield 事件 dict，最后一帧为 final/cancelled。"""
+        for step in range(1, self._max_steps + 1):
+            if cancel_event is not None and cancel_event.is_set():
+                yield {"type": "cancelled"}
+                return
+
+            logger.info("[Agent/Voice] Step %d/%d messages=%d",
+                        step, self._max_steps, len(messages))
+
+            # ── 流式调用 LLM，累积 content / tool_calls ──
+            content_parts: list[str] = []
+            tool_calls = None
+            reasoning = ""
+            try:
+                for kind, payload in self._llm.agent_chat_stream(
+                    system_prompt=system,
+                    messages=messages,
+                    tools=self._tools.registry.get_all_schemas(),
+                ):
+                    if cancel_event is not None and cancel_event.is_set():
+                        yield {"type": "cancelled"}
+                        return
+                    if kind == "delta":
+                        content_parts.append(payload)
+                        # 工具轮通常没有 delta；一旦最终有 tool_calls，
+                        # 前端会按 tool_start 丢弃本轮朗读
+                        yield {"type": "token", "content": payload}
+                    elif kind == "done":
+                        tool_calls = payload.get("tool_calls")
+                        if not content_parts and payload.get("content"):
+                            # 非流式降级后端：content 只在 done 里
+                            content_parts.append(payload["content"])
+                            yield {"type": "token", "content": payload["content"]}
+                        reasoning = payload.get("reasoning", "") or ""
+            except Exception as e:
+                logger.exception("[Agent/Voice] LLM stream failed at step %d", step)
+                yield {"type": "error", "message": f"AI 调用失败：{e}"}
+                return
+
+            content = "".join(content_parts)
+
+            # ── 无工具调用：本轮即最终回复 ──
+            if not tool_calls:
+                yield {"type": "final", "content": content or "完成。"}
+                return
+
+            # ── 分流 confirm_action 与普通工具 ──
+            confirm_tc = None
+            action_tcs: list[dict] = []
+            for tc in tool_calls:
+                if tc["function"]["name"] == "confirm_action":
+                    confirm_tc = tc
+                else:
+                    action_tcs.append(tc)
+
+            # 语音链路不触发 IM progress_callback（否则用户微信会收到调试消息）
+
+            if confirm_tc is not None:
+                try:
+                    args = json.loads(confirm_tc["function"]["arguments"])
+                except (json.JSONDecodeError, KeyError):
+                    args = {"action": "执行操作", "details": ""}
+                action = args.get("action", "执行操作")
+                details = args.get("details", "")
+                question = f"需要你确认：{action}"
+                if details:
+                    question += f"\n{details}"
+                question += "\n说「确定」执行，说「取消」放弃。"
+
+                all_tcs = [confirm_tc] + action_tcs
+                messages.append({
+                    "role": "assistant",
+                    "content": content or None,
+                    "reasoning_content": reasoning,
+                    "tool_calls": all_tcs,
+                })
+                with self._state_lock:
+                    self._pending_confirms[conversation_key] = {
+                        "question": question,
+                        "messages": messages,
+                        "system": system,
+                        "confirm_tool_call_id": confirm_tc["id"],
+                        "action_tcs": action_tcs,
+                    }
+                yield {"type": "confirm", "question": question}
+                return
+
+            # 记录工具调用轮（DeepSeek 要求保留 reasoning_content）
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": reasoning,
+                "tool_calls": tool_calls,
+            })
+
+            # ── 逐个执行工具 ──
+            with self._state_lock:
+                bypass = conversation_key in self._bypass_confirms
+                self._bypass_confirms.discard(conversation_key)
+
+            for tc in action_tcs:
+                if cancel_event is not None and cancel_event.is_set():
+                    yield {"type": "cancelled"}
+                    return
+
+                name = tc["function"]["name"]
+                try:
+                    args = self._parse_args(tc)
+                except json.JSONDecodeError:
+                    args = {}
+
+                logger.info("[Agent/Voice] Tool call: %s(%s)", name, args)
+                yield {"type": "tool_start", "name": name}
+
+                tool = self._tools.registry.get(name)
+                if tool and getattr(tool, "requires_confirm", False) and not bypass:
+                    result = f"工具「{name}」是写操作，必须先调用 confirm_action 获取用户确认。"
+                else:
+                    try:
+                        result = self._tools.registry.execute(name, args)
+                    except Exception as e:
+                        result = f"工具「{name}」执行出错: {e}"
+                        logger.warning("[Agent/Voice] tool %s failed: %s", name, e)
+
+                result = result or "（工具返回为空）"
+                logger.info("[Agent/Voice] Tool result: %s...", result[:120])
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                })
+                yield {"type": "tool_done", "name": name,
+                       "preview": result[:160]}
+
+        logger.warning("[Agent/Voice] Exceeded max_steps=%d", self._max_steps)
+        yield {"type": "final", "content": "我还在思考中，能再说一遍吗？"}
+
     # ── ReAct loop core ────────────────────────────────────────────
 
     def _react_loop(self, system: str,
