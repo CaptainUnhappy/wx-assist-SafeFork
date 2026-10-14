@@ -269,6 +269,15 @@ class Bot:
             config=config,
         )
 
+        # 联系人静默同步（纯旁路，见 src/db/contact_sync.py）
+        contact_syncer = None
+        try:
+            from .db.contact_sync import ContactSyncer
+            contact_syncer = ContactSyncer(store)
+            router.set_contact_syncer(contact_syncer)
+        except Exception:
+            logger.debug("ContactSyncer 初始化跳过", exc_info=True)
+
         # ── 4. Web UI status ────────────────────────────────────
         # (web server already started by desktop.py)
         try:
@@ -287,6 +296,15 @@ class Bot:
         backend = self._create_wechat_backend(store)
         self._backend = backend
         self.backend = backend   # public ref for lifecycle control
+
+        # 联系人同步器惰性获取微信客户端，并在后台静默运行
+        if contact_syncer is not None:
+            try:
+                contact_syncer.attach_client_provider(
+                    lambda: getattr(backend, "_client", None))
+                contact_syncer.start()
+            except Exception:
+                logger.debug("ContactSyncer 启动跳过", exc_info=True)
 
         # Register backend with web server for stop/restart (explicit
         # API — no monkey-patching needed).
@@ -324,6 +342,8 @@ class Bot:
         # ── 6. Signal handling ──────────────────────────────────
         def shutdown(signum, frame):
             logger.info("Received signal %d. Shutting down...", signum)
+            if contact_syncer is not None:
+                contact_syncer.stop()
             backend.stop()
             if self._health:
                 self._health.stop()
@@ -849,6 +869,13 @@ class Bot:
         except KeyboardInterrupt:
             pass
         finally:
+            # 静默联系人同步线程先停（纯旁路）
+            _csx = locals().get("contact_syncer")
+            if _csx is not None:
+                try:
+                    _csx.stop()
+                except Exception:
+                    pass
             # MCP shutdown first
             if mcp_manager is not None:
                 try:

@@ -71,6 +71,7 @@ class MessageRouter:
         self._config = config
         self._agent_engine = agent_engine
         self._rag = None
+        self._contact_syncer = None  # 可选的静默联系人同步器（旁路）
         self._memory = MemoryConsolidator(store, summarizer)
         # Health monitoring: count unique messages processed (post-dedup)
         self.messages_processed: int = 0
@@ -85,6 +86,10 @@ class MessageRouter:
     def set_rag(self, rag):
         """Set RAGEngine for incremental indexing. Called after Router init."""
         self._rag = rag
+
+    def set_contact_syncer(self, syncer) -> None:
+        """注入静默联系人同步器（旁路，缺失时无任何影响）。"""
+        self._contact_syncer = syncer
 
     def handle(self, msg: dict) -> Optional[str]:
         """Process an incoming message.
@@ -105,6 +110,13 @@ class MessageRouter:
         if not stored:
             return None  # Duplicate — nothing more to do
         self.messages_processed += 1
+
+        # ── 静默联系人同步：仅内存去重，失败绝不影响主流程 ──
+        if self._contact_syncer is not None:
+            try:
+                self._contact_syncer.note(msg.get("sender_id"))
+            except Exception:
+                pass
 
         # ── RAG incremental indexing (optional, zero impact) ──
         if self._rag:

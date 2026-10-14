@@ -69,6 +69,21 @@ CREATE TABLE IF NOT EXISTS group_memory (
 
 CREATE INDEX IF NOT EXISTS idx_trigger_chat_time
     ON trigger_log(chat_id, processed_at DESC);
+
+-- 联系人资料静默缓存：只由后台同步器写入“首次出现”的用户，
+-- 不更新、不删除，不参与任何主流程（纯旁路沉淀）。
+CREATE TABLE IF NOT EXISTS contacts_cache (
+    username     TEXT    PRIMARY KEY,
+    alias        TEXT    NOT NULL DEFAULT '',
+    nick_name    TEXT    NOT NULL DEFAULT '',
+    remark       TEXT    NOT NULL DEFAULT '',
+    display_name TEXT    NOT NULL DEFAULT '',
+    kind         TEXT    NOT NULL DEFAULT 'user',
+    updated_at   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_contact_display
+    ON contacts_cache(display_name);
 """
 
 

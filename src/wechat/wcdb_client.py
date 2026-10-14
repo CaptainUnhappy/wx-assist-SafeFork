@@ -365,6 +365,16 @@ class WcdbNativeClient:
         """联系人列表。"""
         return self._require_reader().get_contacts(keyword=keyword, limit=limit)
 
+    def get_contacts_bulk(self, usernames):
+        """按 username 批量取联系人完整资料（静默同步用）。"""
+        if not usernames:
+            return {}
+        try:
+            return self._require_reader().get_contacts_bulk(usernames)
+        except Exception as exc:                   # noqa: BLE001
+            logger.debug("get_contacts_bulk 失败: %s", exc)
+            return {}
+
     def get_contact_status(self, usernames: list[str]) -> dict:
         """置顶/折叠/静音状态。"""
         if not usernames:

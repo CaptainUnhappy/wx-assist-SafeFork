@@ -573,6 +573,52 @@ class WeChatDbReader:
             result.setdefault(u, "")
         return result
 
+    def get_contacts_bulk(self, usernames: Iterable[str], batch: int = 450) -> dict:
+        """按 username 批量精确取联系人资料（单条 IN 查询，分批执行）。
+
+        返回 ``{username: {alias, nick_name, remark, display_name, is_chatroom}}``。
+        只返回 contact 表中真实存在的行；查不到的不在结果里（由调用方兜底）。
+        """
+        targets = []
+        seen = set()
+        for u in usernames or []:
+            u = str(u or "").strip()
+            if u and u not in seen:
+                seen.add(u)
+                targets.append(u)
+        if not targets:
+            return {}
+        src = self._contact_db()
+        if src is None:
+            return {}
+        result: dict = {}
+        try:
+            for i in range(0, len(targets), batch):
+                chunk = targets[i:i + batch]
+                placeholders = ",".join("?" * len(chunk))
+                conn = self._connect(src)
+                rows = conn.execute(
+                    f"SELECT username, alias, nick_name, remark FROM contact "
+                    f"WHERE username IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    uname = str(row["username"] or "")
+                    alias = str(row["alias"] or "").strip()
+                    nick = str(row["nick_name"] or "").strip()
+                    remark = str(row["remark"] or "").strip()
+                    display = remark or nick or alias or uname
+                    result[uname] = {
+                        "alias": alias,
+                        "nick_name": nick,
+                        "remark": remark,
+                        "display_name": display,
+                        "is_chatroom": uname.endswith("@chatroom"),
+                    }
+        except sqlite3.Error as exc:
+            logger.warning("批量取联系人失败: %s", exc)
+        return result
+
     def get_avatar_urls(self, usernames: Iterable[str]) -> dict:
         """wxid -> 头像 URL。"""
         targets = [str(u) for u in (usernames or []) if u]

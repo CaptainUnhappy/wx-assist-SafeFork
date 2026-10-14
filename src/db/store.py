@@ -185,6 +185,75 @@ class MessageStore:
         ).fetchone()
         return row["sender_name"] if row else None
 
+    # ── contacts_cache（静默旁路，见 src/db/contact_sync.py）────────
+
+    def load_cached_contact_ids(self) -> set:
+        """已沉淀过的 username 集合（启动时一次性载入内存去重）。"""
+        try:
+            rows = self.conn.execute(
+                "SELECT username FROM contacts_cache").fetchall()
+            return {r["username"] for r in rows}
+        except sqlite3.Error:
+            return set()
+
+    def insert_contacts_ignore(self, records: list) -> int:
+        """只插入“新人”，主键已存在则忽略（永不 update）。
+
+        Args:
+            records: [(username, alias, nick_name, remark, display_name, kind, ts), ...]
+        Returns:
+            实际新增行数。
+        """
+        if not records:
+            return 0
+        with self._write_lock:
+            before = self.conn.total_changes
+            try:
+                self.conn.executemany(
+                    """INSERT OR IGNORE INTO contacts_cache
+                       (username, alias, nick_name, remark, display_name, kind, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    records,
+                )
+                self.conn.commit()
+            except sqlite3.Error as e:
+                logger.warning("contacts_cache 写入失败: %s", e)
+                return 0
+            return self.conn.total_changes - before
+
+    def get_recent_sender_names(self, usernames: list) -> dict:
+        """批量取一批 username 在消息里最近用过的显示名（联系人表缺失时兜底）。"""
+        if not usernames:
+            return {}
+        out: dict[str, str] = {}
+        try:
+            placeholders = ",".join("?" * len(usernames))
+            rows = self.conn.execute(
+                f"""SELECT sender_id, sender_name FROM user_last_message
+                    WHERE sender_id IN ({placeholders})
+                      AND sender_name IS NOT NULL AND sender_name != ''""",
+                tuple(usernames),
+            ).fetchall()
+            for r in rows:
+                out[r["sender_id"]] = r["sender_name"]
+        except sqlite3.Error:
+            return out
+        return out
+
+    def iter_distinct_senders(self, batch: int = 1000):
+        """流式产出消息表里出现过的全部去重 sender_id（启动回填用，不一次性载入）。"""
+        try:
+            cur = self.conn.execute(
+                "SELECT DISTINCT sender_id FROM messages WHERE sender_id IS NOT NULL AND sender_id != ''")
+            while True:
+                rows = cur.fetchmany(batch)
+                if not rows:
+                    break
+                for r in rows:
+                    yield r["sender_id"]
+        except sqlite3.Error:
+            return
+
     def get_user_last_timestamp(self, chat_id: str,
                                 sender_id: str) -> Optional[int]:
         """Get the Unix timestamp of a user's most recent message in a chat.
