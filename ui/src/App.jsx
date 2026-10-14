@@ -1,6 +1,6 @@
-﻿import { useState, useEffect } from 'react'
+﻿﻿﻿﻿import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Gear, ChartLine, Scroll, Spinner, Sun, Moon, ChatCircleDots, Star, Eye, Newspaper, Chats, PaperPlaneTilt, Bell, QrCode, X, PuzzlePiece, Clock } from '@phosphor-icons/react'
+import { Gear, ChartLine, Scroll, Spinner, Sun, Moon, ChatCircleDots, Star, Eye, Newspaper, Chats, PaperPlaneTilt, Bell, QrCode, X, PuzzlePiece, Clock, Microphone } from '@phosphor-icons/react'
 import { API_BASE, getWsUrl } from './components/SharedComponents'
 import Dashboard from './components/Dashboard'
 import ConfigPanel from './components/ConfigPanel'
@@ -15,6 +15,7 @@ import SchedulerPanel from './components/SchedulerPanel'
 import ChatTab from './components/ChatTab'
 import FeatureGuide from './components/FeatureGuide'
 import TaskCenter from './components/TaskCenter'
+import VoiceCall from './components/VoiceCall'
 import LANCard from './components/LANCard'
 import CloseConfirmDialog from './components/CloseConfirmDialog'
 import { AmbientWaveBackground } from './components/AmbientBackground'
@@ -31,6 +32,7 @@ const TABS = [
       { id: 'ai', label: 'AI 后端配置' },
       { id: 'data', label: '数据配置' },
       { id: 'push', label: '消息推送' },
+      { id: 'voice', label: '语音通话' },
       { id: 'general', label: '通用' },
     ],
   },
@@ -61,6 +63,9 @@ export default function App() {
   const [showGuide, setShowGuide] = useState(false) // FeatureGuide only shows right after onboarding
   const [wsConnected, setWsConnected] = useState(false)
   const [showTaskCenter, setShowTaskCenter] = useState(false)
+  const [showVoice, setShowVoice] = useState(false)
+  const [voiceEnabled, setVoiceEnabled] = useState(true)
+  const [voiceChannelAvailable, setVoiceChannelAvailable] = useState(true)
   const [showLAN, setShowLAN] = useState(false)
   // /api/update/check 的结果：通用分区和侧边栏红点共用这一份，避免各自重复请求
   const [updateInfo, setUpdateInfo] = useState(null)
@@ -103,6 +108,25 @@ export default function App() {
     }
     poll()
     const id = setInterval(poll, 10000)
+    return () => clearInterval(id)
+  }, [onboardingDone])
+
+  // 语音助手：总开关 + A/B 任一通道可用，才显示右下角麦克风
+  useEffect(() => {
+    if (!onboardingDone) return
+    const fetchVoiceCfg = () => {
+      fetch(`${API_BASE}/api/voice/realtime/config`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (!d.ok) return
+          setVoiceEnabled(d.voice_enabled !== false)
+          // enabled=B档已配置启用；standard_enabled 缺省视为 true（免费通道始终可用）
+          setVoiceChannelAvailable(!!(d.enabled || d.standard_enabled !== false))
+        })
+        .catch(() => {})
+    }
+    fetchVoiceCfg()
+    const id = setInterval(fetchVoiceCfg, 15000)
     return () => clearInterval(id)
   }, [onboardingDone])
 
@@ -502,7 +526,7 @@ export default function App() {
                       <div className="flex gap-0.5 mt-0.5 ml-0.5">
                         {subs.filter(sub => {
                           if (id === 'scheduler') return true
-                          return sub.id === 'ai' || sub.id === 'push'
+                          return sub.id === 'ai' || sub.id === 'push' || sub.id === 'voice'
                         }).map(sub => {
                           const curSection =
                             id === 'scheduler' ? schedulerSection : configSection
@@ -563,6 +587,27 @@ export default function App() {
 
       {/* Task Center Drawer */}
       <TaskCenter open={showTaskCenter} onClose={() => setShowTaskCenter(false)} />
+
+      {/* Voice Companion 悬浮入口 */}
+      <AnimatePresence>
+        {onboardingDone && voiceEnabled && voiceChannelAvailable && !showVoice && (
+          <motion.button
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 260, damping: 20 }}
+            onClick={() => setShowVoice(true)}
+            title="语音助手"
+            className="group fixed bottom-6 right-6 z-[150] flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-teal-600 text-white shadow-xl shadow-emerald-500/30 transition hover:scale-105 active:scale-95"
+          >
+            <span className="absolute inset-0 animate-ping rounded-full bg-emerald-400/30 [animation-duration:2.6s]" />
+            <Microphone size={24} weight="fill" className="relative" />
+          </motion.button>
+        )}
+      </AnimatePresence>
+
+      {/* Voice Companion 全屏通话 */}
+      <VoiceCall open={showVoice} onClose={() => setShowVoice(false)} />
 
       {/* 关窗确认弹窗：由 desktop.py 通过 evaluate_js 唤起 */}
       <CloseConfirmDialog />

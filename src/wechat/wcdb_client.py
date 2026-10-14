@@ -37,6 +37,7 @@ import threading
 from pathlib import Path
 
 from . import db_crypto
+from .account_paths import find_account_base_from_dbpath, list_account_dirs
 from .db_reader import WeChatDbReader
 
 logger = logging.getLogger(__name__)
@@ -59,13 +60,12 @@ def _find_wxid_and_dbpath(custom_base_dir: str = ""):
         p = Path(env_db_path)
         if p.exists():
             if p.is_file():
-                parent = p.parent
-                while parent.parent != parent:
-                    if parent.name.startswith("wxid_"):
-                        base = str(parent.parent)
-                        logger.info("Env override (file→dir): wxid=%s base=%s", env_wxid, base)
-                        return env_wxid, base
-                    parent = parent.parent
+                # 由数据库文件反推数据根目录（按账号目录结构识别，
+                # 自定义微信号命名的账号目录同样支持）
+                base = find_account_base_from_dbpath(p)
+                if base:
+                    logger.info("Env override (file→dir): wxid=%s base=%s", env_wxid, base)
+                    return env_wxid, base
             elif p.is_dir():
                 logger.info("Env override (dir): wxid=%s base=%s", env_wxid, env_db_path)
                 return env_wxid, env_db_path
@@ -97,36 +97,27 @@ def _find_wxid_and_dbpath(custom_base_dir: str = ""):
     for base in candidates:
         if not base.exists():
             continue
-        try:
-            wxid_dirs = sorted(
-                [d for d in base.iterdir() if d.is_dir() and d.name.startswith("wxid_")],
-                key=lambda d: d.stat().st_mtime,
-                reverse=True,
-            )
-        except PermissionError:
-            logger.warning("Permission denied reading %s — skipping", base)
-            continue
-
-        for wxid_dir in wxid_dirs:
-            session_db = wxid_dir / "db_storage" / "session" / "session.db"
-            if session_db.exists():
-                source = "custom" if (base == candidates[0] and custom_base_dir) else "auto"
-                logger.info("%s-detected: wxid=%s db=%s", source, wxid_dir.name, str(base))
-                return wxid_dir.name, str(base)
+        # 按目录内部结构识别账号目录（不依赖 wxid_ 前缀），按最近登录排序
+        for account_dir in list_account_dirs(base):
+            source = "custom" if (base == candidates[0] and custom_base_dir) else "auto"
+            logger.info("%s-detected: wxid=%s db=%s", source, account_dir.name, str(base))
+            return account_dir.name, str(base)
 
     raise FileNotFoundError(
         "未找到微信数据目录。可能原因：\n"
         "1. 微信未安装或未登录过；\n"
         "2. 微信数据目录不在默认位置（如已迁移到其他盘）。\n"
-        "请在系统配置 → 数据路径中手动指定微信数据目录（即包含 wxid_* 文件夹的父目录）。"
+        "请在系统配置 → 数据路径中手动指定微信数据目录"
+        "（即包含微信账号文件夹——以微信号命名的父目录）。"
     )
 
 
 def _find_account_dir(wxid: str, base_dir: str) -> Path:
     """在数据根目录下定位具体的账号目录。
 
-    微信的账号目录名形如 ``wxid_xxx_abcd``，而 ``WXID`` 配置里可能只写了
-    ``wxid_xxx`` 前缀，这里做前缀匹配。
+    微信 4.x 的账号目录名 = 微信号 + ``_`` + 4位hex后缀（自定义微信号
+    同样如此，如 ``caojunzhi_abcd``）。``WXID`` 配置里可能只写了不带后缀
+    的 ID，这里做前缀匹配；完全找不到时回退到结构识别出的最近账号目录。
     """
     base = Path(base_dir)
     if not base.exists():
@@ -140,11 +131,11 @@ def _find_account_dir(wxid: str, base_dir: str) -> Path:
             if entry.is_dir() and entry.name.startswith(wxid):
                 return entry
 
-    for entry in base.iterdir():
-        if entry.is_dir() and entry.name.startswith("wxid_"):
-            return entry
+    account_dirs = list_account_dirs(base)
+    if account_dirs:
+        return account_dirs[0]
 
-    raise RuntimeError(f"在 {base} 下找不到 wxid_* 账号目录")
+    raise RuntimeError(f"在 {base} 下找不到微信账号目录")
 
 
 # ── 客户端 ───────────────────────────────────────────────────────────

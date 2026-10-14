@@ -1,10 +1,11 @@
-﻿import { useState, useRef, useEffect } from 'react'
+﻿﻿﻿﻿import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle, Warning, FloppyDisk, Info, CircleNotch, MagnifyingGlass, Lightning, PaperPlaneTilt, QrCode, SignOut, TestTube, ChatCircle, Trash, CaretDown, CaretRight, X, Brain, ArrowsClockwise, DownloadSimple, Rocket, ArrowSquareOut } from '@phosphor-icons/react'
 import { QRCodeSVG } from 'qrcode.react'
 import { spring, Field, Toggle, Select, Input, API_BASE, getWsUrl } from './SharedComponents'
 import ChatDrawer from './ChatDrawer'
 import PlatformConfigDemo from './PlatformConfigDemo'
+import VoiceSection from './VoiceSection'
 
 const pageTransition = {
   initial: { opacity: 0, x: 12 },
@@ -867,8 +868,8 @@ function GeneralSection({ form, update, updateInfo, onCheckUpdate }) {
   )
 }
 
-const sectionTitles = { ai: 'AI 后端配置', identity: '聊天范围', data: '数据配置', push: '消息推送', general: '通用', sandbox: 'AI 调试台' }
-const sectionAccents = { ai: 'var(--brand-green)', identity: 'var(--status-info)', data: 'var(--brand-green)', push: 'var(--brand-green)', general: 'var(--status-info)', sandbox: 'var(--color-purple-500, #8b5cf6)' }
+const sectionTitles = { ai: 'AI 后端配置', identity: '聊天范围', data: '数据配置', push: '消息推送', voice: '语音通话', general: '通用', sandbox: 'AI 调试台' }
+const sectionAccents = { ai: 'var(--brand-green)', identity: 'var(--status-info)', data: 'var(--brand-green)', push: 'var(--brand-green)', voice: 'var(--brand-green)', general: 'var(--status-info)', sandbox: 'var(--color-purple-500, #8b5cf6)' }
 
 // ── Credentials Section (连接凭证配置) ─────────────────────────────────
 
@@ -1015,7 +1016,7 @@ function CredentialsSection({ form, update }) {
 
   // Format validation for test connection
   const keyFormatOk = !draft.wcdb_key || (draft.wcdb_key.length === 64 && /^[0-9a-fA-F]+$/.test(draft.wcdb_key))
-  const wxidFormatOk = !draft.wxid || draft.wxid.startsWith('wxid_')
+  // 微信 4.x 支持自定义微信号作为账号标识，不再校验 wxid_ 前缀
   const dbPathFormatOk = !draft.db_path || draft.db_path.length > 0
 
   async function testConnection() {
@@ -1061,7 +1062,7 @@ function CredentialsSection({ form, update }) {
           <div className="flex items-center gap-2">
             <button
               onClick={saveEdit}
-              disabled={!keyFormatOk || !wxidFormatOk || !dbPathFormatOk}
+              disabled={!keyFormatOk || !dbPathFormatOk}
               className="text-xs px-3 py-1.5 rounded-full bg-brand-green-hover text-white font-semibold hover:opacity-90 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default"
             >保存</button>
             <button
@@ -1136,8 +1137,8 @@ function CredentialsSection({ form, update }) {
               {form.wxid || '—'}
             </div>
           )}
-          {editing && draft.wxid && !wxidFormatOk && (
-            <p className="text-xs text-status-error mt-1">❌ 账号标识应以 wxid_ 开头</p>
+          {editing && !draft.wxid && (
+            <p className="text-xs text-status-warn mt-1">⚠ 留空将无法自动定位账号目录，建议填写</p>
           )}
         </div>
 
@@ -1522,7 +1523,7 @@ function DataPathSection({ form, update, detectedDataDir }) {
   return (
     <div>
       <Field label="微信数据目录"
-        hint="微信聊天记录存储的父目录（包含 wxid_* 文件夹）。留空则自动从 Documents 检测。">
+        hint="微信聊天记录存储的父目录（包含以微信号命名的账号文件夹）。留空则自动从 Documents 检测。">
         <div className="flex items-start gap-2">
           <div className="flex-1 relative">
             <input
@@ -1620,7 +1621,7 @@ function DataPathSection({ form, update, detectedDataDir }) {
       )}
       {!detectedDataDir && !hasCustomPath && (
         <p className="text-xs text-text-muted mt-3 leading-relaxed">
-          ⚠ 未检测到默认微信数据目录，请手动指定包含 <code className="bg-bg-raised px-1.5 py-0.5 rounded font-mono text-xs">wxid_*</code> 文件夹的父目录
+          ⚠ 未检测到默认微信数据目录，请手动指定包含微信账号文件夹（以微信号命名）的父目录
         </p>
       )}
       {hasCustomPath && (
@@ -2855,6 +2856,7 @@ export default function ConfigPanel({ activeSection, onNavigate, updateInfo, onC
                   </div>
                 )}
                 {activeSection === 'push' && <PushPlatformView />}
+                {activeSection === 'voice' && <VoiceSection />}
                 {activeSection === 'general' && (
                   <GeneralSection
                     form={form}
@@ -2869,7 +2871,7 @@ export default function ConfigPanel({ activeSection, onNavigate, updateInfo, onC
         </AnimatePresence>
       </div>
 
-      {activeSection !== 'push' && activeSection !== 'general' && (
+      {activeSection !== 'push' && activeSection !== 'general' && activeSection !== 'voice' && (
         <>
           <div className="mt-8 flex flex-col sm:flex-row items-center gap-4">
             <motion.button

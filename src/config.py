@@ -215,6 +215,47 @@ class BotConfig:
     # JSON string for extra_body, e.g. '{"thinking":{"type":"disabled"}}'
     ai_provider_extra_body: str = ""
 
+    # === Voice 标准模式（A 档：STT + LLM + TTS 拼装，全双工不可用时的降级/省钱通道）===
+    # A 档总开关：与 B 档独立。两者都开时 B 优先，B 连接失败自动降级 A。
+    voice_standard_enabled: bool = True
+    # 识别通道：browser（浏览器内置识别，免费，Edge 国内可用）| openai（云端 /audio/transcriptions）
+    voice_stt_provider: str = "browser"
+    # 云端语音识别（OpenAI 兼容 /audio/transcriptions），stt_provider=openai 时生效。
+    voice_stt_base_url: str = ""
+    voice_stt_api_key: str = ""
+    voice_stt_model: str = "whisper-1"
+    # 合成通道：edge（免费，默认）| qwen（千问实时流式 TTS，复用 B 档 Key）| openai（/audio/speech）
+    voice_tts_provider: str = "edge"
+    voice_tts_base_url: str = ""
+    voice_tts_api_key: str = ""
+    voice_tts_model: str = "tts-1"
+    # edge-tts 音色，如 zh-CN-XiaoxiaoNeural / zh-CN-YunxiNeural
+    voice_tts_voice: str = "zh-CN-XiaoxiaoNeural"
+    # 千问流式 TTS（A 档 tts_provider=qwen 时使用，WebSocket，Key 复用 VOICE_REALTIME_API_KEY）
+    voice_tts_qwen_model: str = "qwen3-tts-flash-realtime"
+    voice_tts_qwen_voice: str = "Cherry"
+
+    # === Voice Realtime（B 档：端到端全双工通话）===
+    # 语音助手总开关：关闭后网页不再显示麦克风入口（与 A/B 通道开关独立）。
+    voice_assistant_enabled: bool = True
+    # B 档服务商：qwen（千问 Realtime）| volc（火山豆包 Seeduplex 3.0 全双工）
+    voice_rt_provider: str = "qwen"
+    # ── 千问 ──
+    # B 档：填了 Key 并开启走端到端全双工（主通道）；未开启或连不上降级 A 档。
+    # 平台：https://platform.qianwenai.com  WebSocket 地址在代码内固定。
+    voice_realtime_enabled: bool = False
+    voice_realtime_api_key: str = ""
+    voice_realtime_model: str = "qwen3.8-omni-flash-realtime"
+    # 音色随模型家族不同：omni 系列用 Tina/Cindy 等，qwen-audio 系列用 longanqian_v3.1 等
+    voice_realtime_voice: str = "Tina"
+    # server_vad（声学停顿断句）| smart_turn（语义断句，嗯/啊不打断，推荐）
+    voice_realtime_turn_mode: str = "smart_turn"
+    # ── 火山豆包 Seeduplex 3.0（model 固定 1.2.6.1，X-Api-Key 鉴权）──
+    voice_volc_enabled: bool = False
+    voice_volc_api_key: str = ""
+    # 主打音色：Vivi2.0/小何2.0/云舟2.0/小天2.0
+    voice_volc_voice: str = "zh_female_vv_uranus_bigtts"
+
     # === WeChat Backend ===
     wechat_backend: str = "wcdb"
     # Custom WeChat data directory. Leave empty to auto-detect from Documents.
@@ -312,6 +353,45 @@ def load_config() -> BotConfig:
         "ai_provider_type": os.getenv("AI_PROVIDER_TYPE", "openai").strip(),
         "ai_provider_model": os.getenv("AI_PROVIDER_MODEL", "").strip(),
         "ai_provider_extra_body": os.getenv("AI_PROVIDER_EXTRA_BODY", "").strip(),
+        # Voice 标准模式（A 档）
+        "voice_standard_enabled": os.getenv("VOICE_STANDARD_ENABLED", "true").strip().lower() != "false",
+        "voice_stt_provider": (os.getenv("VOICE_STT_PROVIDER", "browser").strip().lower()
+                               or "browser"),
+        "voice_stt_base_url": os.getenv("VOICE_STT_BASE_URL", "").strip(),
+        "voice_stt_api_key": os.getenv("VOICE_STT_API_KEY", "").strip(),
+        "voice_stt_model": os.getenv("VOICE_STT_MODEL", "whisper-1").strip() or "whisper-1",
+        "voice_tts_provider": (os.getenv("VOICE_TTS_PROVIDER", "edge").strip().lower()
+                               or "edge"),
+        "voice_tts_base_url": os.getenv("VOICE_TTS_BASE_URL", "").strip(),
+        "voice_tts_api_key": os.getenv("VOICE_TTS_API_KEY", "").strip(),
+        "voice_tts_model": os.getenv("VOICE_TTS_MODEL", "tts-1").strip() or "tts-1",
+        "voice_tts_voice": (os.getenv("VOICE_TTS_VOICE", "zh-CN-XiaoxiaoNeural").strip()
+                            or "zh-CN-XiaoxiaoNeural"),
+        "voice_tts_qwen_model": (os.getenv("VOICE_TTS_QWEN_MODEL",
+                                           "qwen3-tts-flash-realtime").strip()
+                                 or "qwen3-tts-flash-realtime"),
+        "voice_tts_qwen_voice": (os.getenv("VOICE_TTS_QWEN_VOICE", "Cherry").strip()
+                                 or "Cherry"),
+        # Voice Realtime（B 档）
+        "voice_assistant_enabled": os.getenv("VOICE_ENABLED", "true").strip().lower() != "false",
+        "voice_realtime_enabled": os.getenv("VOICE_REALTIME_ENABLED", "false").strip().lower() == "true",
+        "voice_realtime_api_key": os.getenv("VOICE_REALTIME_API_KEY", "").strip(),
+        "voice_realtime_model": (os.getenv("VOICE_REALTIME_MODEL",
+                                           "qwen3.8-omni-flash-realtime").strip()
+                                 or "qwen3.8-omni-flash-realtime"),
+        "voice_realtime_voice": (os.getenv("VOICE_REALTIME_VOICE", "Tina").strip()
+                                 or "Tina"),
+        "voice_realtime_turn_mode": (os.getenv("VOICE_REALTIME_TURN_MODE",
+                                               "smart_turn").strip().lower()
+                                     or "smart_turn"),
+        # 火山 Seeduplex
+        "voice_rt_provider": (os.getenv("VOICE_RT_PROVIDER", "qwen").strip().lower()
+                              or "qwen"),
+        "voice_volc_enabled": os.getenv("VOICE_VOLC_ENABLED", "false").strip().lower() == "true",
+        "voice_volc_api_key": os.getenv("VOICE_VOLC_API_KEY", "").strip(),
+        "voice_volc_voice": (os.getenv("VOICE_VOLC_VOICE",
+                                       "zh_female_vv_uranus_bigtts").strip()
+                             or "zh_female_vv_uranus_bigtts"),
     }
 
     _validate_config(kwargs)

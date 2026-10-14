@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { CheckCircle, ArrowRight, Spinner, XCircle, Warning, MagnifyingGlass, CircleNotch, Lightning, ChatCircle, CaretDown, CaretRight, Folder } from '@phosphor-icons/react'
 import { Field, Select, Input, Toggle, spring, API_BASE } from './SharedComponents'
@@ -922,7 +922,7 @@ export function Step2DataDir({ data, updateData, onDone }) {
 
       <div className="space-y-6 mt-4">
         <p className="text-[14px] text-text-muted leading-relaxed">
-          摘星需要定位微信数据目录以读取聊天记录。该目录包含以 <code className="bg-bg-raised px-1.5 py-0.5 rounded font-mono text-xs">wxid_</code> 开头的账号文件夹。
+          摘星需要定位微信数据目录以读取聊天记录。该目录包含以 <code className="bg-bg-raised px-1.5 py-0.5 rounded font-mono text-xs">微信号</code> 命名的账号文件夹。
         </p>
 
         {/* Auto-detect result */}
@@ -960,7 +960,7 @@ export function Step2DataDir({ data, updateData, onDone }) {
                 <Warning size={18} weight="fill" className="text-status-warn shrink-0 mt-0.5" />
                 <div>
                   <span className="text-sm text-status-warn font-semibold">未检测到数据目录</span>
-                  <p className="text-xs text-text-muted mt-1">请点击「浏览」手动选择微信数据目录（包含 wxid_* 文件夹的父目录）</p>
+                  <p className="text-xs text-text-muted mt-1">请点击「浏览」手动选择微信数据目录（包含以微信号命名的账号文件夹的父目录）</p>
                 </div>
               </div>
             )}

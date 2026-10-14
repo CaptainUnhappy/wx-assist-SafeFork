@@ -537,6 +537,53 @@ class ToolExecutor:
             handler=self._handle_search_favorites,
         )
 
+        # ── query_my_feed（查"系统推送给我的消息"历史）──────────────
+        r.register(
+            name="query_my_feed",
+            description="查询系统历史推送给【当前用户本人】的消息流——包括公众号即时文章提醒、"
+                       "公众号定时摘要、群聊定时摘要、关键词预警、以及 GitHub榜单/RSS 等定时任务的推送。"
+                       "当用户问'总结昨天/今天/某天的内容'、'昨天都推了什么'、'我收到哪些提醒'、"
+                       "'昨天的公众号更新'、'最近有什么新闻/榜单'时调用。"
+                       "返回按时间正序排列的推送标题和正文。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "day": {
+                        "type": "string",
+                        "description": "快捷日期：'yesterday'=昨天（默认），'today'=今天，"
+                                       "或直接给 YYYY-MM-DD 日期。与 date_from/date_to 二选一。",
+                    },
+                    "date_from": {
+                        "type": "string",
+                        "description": "起始日期 YYYY-MM-DD（与 date_to 配合使用，跨天范围时用）",
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "结束日期 YYYY-MM-DD，含当天",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "内容类别筛选，可选："
+                                       "'all'(全部，默认)、"
+                                       "'oa_article'(公众号即时文章提醒)、"
+                                       "'oa_digest'(公众号定时摘要)、"
+                                       "'group_digest'(群聊摘要)、"
+                                       "'keyword_alert'(关键词预警)、"
+                                       "'cron'(定时任务推送，如 GitHub 榜单/RSS)",
+                    },
+                    "keyword": {
+                        "type": "string",
+                        "description": "关键词过滤（匹配标题或正文），可选",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多返回条数，默认 100，最大 200",
+                    },
+                },
+            },
+            handler=self._handle_query_my_feed,
+        )
+
         # ── Skill 工具 ───────────────────────────────────────────────
         if self._skill_engine:
             self._register_skill_tools()
@@ -1437,7 +1484,10 @@ class ToolExecutor:
             return "RAG功能已关闭，请在系统配置中启动；"
 
         try:
-            results = self._rag.search(query=query, top_k=20, final_k=top_k)
+            results = self._rag.search(
+                query=query, top_k=20, final_k=top_k,
+                where={"source": "msg"},
+            )
         except Exception as e:
             logger.warning("search_chat_history failed: %s", e)
             return f"搜索失败: {e}"
@@ -1564,6 +1614,131 @@ class ToolExecutor:
                 f"{i}. [{sender} {ts}] {chunk.content[:200]}"
             )
         return "\n".join(lines)
+
+    # ── query_my_feed（系统推送给用户本人的消息流）──────────────────
+
+    # category 参数 → outbox type 词表映射
+    _FEED_CATEGORY_MAP = {
+        "all": "",
+        "oa_article": "oa_article_alert",
+        "oa_digest": "oa_digest",
+        "group_digest": "group_digest",
+        "keyword_alert": "keyword_alert",
+        "cron": "cron",
+    }
+
+    _FEED_TYPE_LABELS = {
+        "oa_article_alert": "公众号文章提醒",
+        "oa_digest": "公众号摘要",
+        "group_digest": "群聊摘要",
+        "keyword_alert": "关键词预警",
+        "cron": "定时任务",
+    }
+
+    # 单条正文 / 整体输出的长度上限，防止推送太多把上下文撑爆
+    _FEED_ITEM_MAX_CHARS = 1200
+    _FEED_TOTAL_MAX_CHARS = 16000
+
+    def _handle_query_my_feed(self, day: str = "yesterday",
+                              date_from: str = "", date_to: str = "",
+                              category: str = "all",
+                              keyword: str = "",
+                              limit: int = 100) -> str:
+        """查询系统推送给用户本人的历史消息流（按日期/类别/关键词）。"""
+        from src.assistant.outbox import Outbox
+
+        # ── 1. 解析日期范围 ──
+        today = datetime.now().date()
+        df = (date_from or "").strip()
+        dt = (date_to or "").strip()
+        day = (day or "").strip().lower()
+        if not df and not dt:
+            if day in ("today", "今天", "今日"):
+                df = dt = today.isoformat()
+            elif day in ("yesterday", "昨天", "昨日", ""):
+                y = today.fromordinal(today.toordinal() - 1)
+                df = dt = y.isoformat()
+            else:
+                # 视为 YYYY-MM-DD
+                df = dt = day
+        elif df and not dt:
+            dt = df
+
+        # ── 2. 类别映射 ──
+        cat = (category or "all").strip().lower()
+        notif_type = self._FEED_CATEGORY_MAP.get(cat, "")
+        if category and cat not in self._FEED_CATEGORY_MAP:
+            return (f"未知类别「{category}」，可选：all / oa_article / oa_digest / "
+                    f"group_digest / keyword_alert / cron")
+
+        # ── 3. 查库 ──
+        try:
+            rows = Outbox().list_by_timerange(
+                date_from=df, date_to=dt,
+                notif_type=notif_type,
+                keyword=(keyword or "").strip(),
+                limit=limit,
+            )
+        except Exception as e:
+            logger.warning("query_my_feed failed: %s", e)
+            return f"查询推送记录失败: {e}"
+
+        if not rows:
+            range_desc = df if df == dt else f"{df} ~ {dt}"
+            cat_label = "" if not notif_type else f"（{self._FEED_TYPE_LABELS.get(notif_type, cat)}）"
+            return f"{range_desc}{cat_label}没有查询到任何推送记录。"
+
+        # ── 4. 解析正文、格式化输出 ──
+        type_counts: dict[str, int] = {}
+        blocks = []
+        total = 0
+        truncated = False
+        for row in rows:
+            rtype = row.get("type", "")
+            type_counts[rtype] = type_counts.get(rtype, 0) + 1
+            created = (row.get("created_at", "") or "").replace("T", " ")[:16]
+            title = (row.get("title", "") or "").strip()
+            body = self._extract_feed_body(row.get("content", ""))
+            label = self._FEED_TYPE_LABELS.get(rtype, rtype)
+
+            block = f"【{created}】{label}｜{title}\n{body}"
+            if total + len(block) > self._FEED_TOTAL_MAX_CHARS:
+                truncated = True
+                break
+            blocks.append(block)
+            total += len(block) + 2
+
+        range_desc = df if df == dt else f"{df} 至 {dt}"
+        summary_parts = [f"{self._FEED_TYPE_LABELS.get(t, t)} {n} 条"
+                         for t, n in type_counts.items()]
+        header = f"{range_desc} 共收到 {len(rows)} 条推送（{ '、'.join(summary_parts) }）："
+        out = header + "\n\n" + "\n\n".join(blocks)
+        if truncated:
+            out += "\n\n…（内容过多，其余已省略，可用 category/keyword 缩小范围再问）"
+        return out
+
+    def _extract_feed_body(self, raw_content: str) -> str:
+        """从 outbox content 提取可阅读正文。
+
+        摘要/预警类存的是 JSON（优先 display，其次 digest/message）；
+        cron 等任务推送是纯文本。
+        """
+        text = (raw_content or "").strip()
+        if text and text[0] == "{":
+            try:
+                data = json.loads(text)
+                text = (data.get("display")
+                        or data.get("digest")
+                        or data.get("message")
+                        or data.get("article_title", "")
+                        or text)
+                text = str(text)
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        text = text.strip()
+        if len(text) > self._FEED_ITEM_MAX_CHARS:
+            text = text[:self._FEED_ITEM_MAX_CHARS] + "…"
+        return text
 
     # ── Cron + Skill task handlers ──────────────────────────────────
 

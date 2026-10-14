@@ -113,13 +113,16 @@ def _detect_image_format(header: bytes) -> str:
     return 'bin'
 
 
-def decrypt_v2_cache(data: bytes, aes_key: str, xor_key: int) -> Optional[bytes]:
+def decrypt_v2_cache(data: bytes, aes_key: str, xor_key: int,
+                     quiet: bool = False) -> Optional[bytes]:
     """Decrypt a V2-format cache file from raw bytes.
 
     Args:
         data: Raw file bytes (including V2 header).
         aes_key: 16-char ASCII AES key string.
         xor_key: Single-byte XOR key (0-255).
+        quiet: True 时把"解密失败"降级为 debug 日志（密钥验证探针
+            会批量试错，逐条 WARNING 会刷屏）。
 
     Returns:
         Decrypted image bytes, or None on failure.
@@ -157,7 +160,10 @@ def decrypt_v2_cache(data: bytes, aes_key: str, xor_key: int) -> Optional[bytes]
     except (ValueError, KeyError) as e:
         # unpad 失败 = 密钥不匹配或数据损坏。这是最高价值的诊断信号，
         # 若密钥推导错误会导致所有 V2 图片静默解密失败。
-        logger.warning("V2 cache decrypt failed (bad key or corrupt data): %s", e)
+        if quiet:
+            logger.debug("V2 cache decrypt failed (verification probe): %s", e)
+        else:
+            logger.warning("V2 cache decrypt failed (bad key or corrupt data): %s", e)
         return None
 
     offset += aligned
@@ -275,15 +281,12 @@ def _find_fav_cache_dir() -> Optional[Path]:
     if not data_path.exists():
         return None
 
-    # Find the most recently accessed wxid directory
-    wxid_dirs = sorted(
-        [d for d in data_path.iterdir()
-         if d.is_dir() and d.name.startswith('wxid_')],
-        key=lambda d: d.stat().st_mtime,
-        reverse=True,
-    )
-    if wxid_dirs:
-        fav_dir = wxid_dirs[0] / 'business' / 'favorite'
+    # Find the most recently used account directory
+    # （结构识别，不依赖 wxid_ 前缀，自定义微信号账号同样支持）
+    from src.wechat.account_paths import list_account_dirs
+    account_dirs = list_account_dirs(data_path)
+    if account_dirs:
+        fav_dir = account_dirs[0] / 'business' / 'favorite'
         if fav_dir.exists():
             return fav_dir
     return None
@@ -365,6 +368,31 @@ def derive_v2_keys(uin: int, wxid: str) -> tuple[str, int]:
     return aes_key, xor_key
 
 
+def _derive_keys_from_base(uin: int, wxid_base: str) -> tuple[str, int]:
+    """由"最终推导输入"直接生成密钥（不再剥目录名后缀）。
+
+    公式与 :func:`derive_v2_keys` 一致：aes = MD5(str(uin) + wxid_base)[:16]，
+    xor = uin & 0xFF。注意：候选输入已是最终形式（如 Name2Id 里的内部
+    wxid），不能再次走 derive_v2_keys 的 rsplit 剥后缀，否则会把
+    ``wxid_xxx`` 错剥成 ``wxid``。
+    """
+    aes_key = hashlib.md5(f'{uin}{wxid_base}'.encode()).hexdigest()[:16]
+    return aes_key, uin & 0xFF
+
+
+def _v2_key_works(sample: bytes, aes_key: str, xor_key: int) -> bool:
+    """用真实 V2 样本验证密钥：能解出合法图片/视频数据才算有效。
+
+    验证探针会批量试错（可能上百个候选），失败走 debug 日志避免刷屏。
+    """
+    if not sample or not aes_key:
+        return False
+    try:
+        return decrypt_v2_cache(sample, aes_key, xor_key, quiet=True) is not None
+    except Exception:                          # noqa: BLE001
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Cache Manager (singleton)
 # ---------------------------------------------------------------------------
@@ -430,12 +458,145 @@ class V2CacheManager:
 
             self._uin = uin
 
-            # Derive keys for each wxid directory
+            # Derive keys for each account directory.
+            # 目录识别不依赖 wxid_ 前缀（自定义微信号账号同样支持）；
+            # 密钥推导对每个账号目录走"候选 + 真实 V2 文件验证"闭环。
             if self._data_dir.exists():
-                for d in self._data_dir.iterdir():
-                    if d.is_dir() and d.name.startswith('wxid_'):
-                        aes_key, xor_key = derive_v2_keys(uin, d.name)
-                        self._keys[d.name] = (aes_key, xor_key)
+                from src.wechat.account_paths import list_account_dirs
+                for d in list_account_dirs(self._data_dir):
+                    if not d.name.startswith('wxid_'):
+                        logger.info(
+                            "V2 keys: account dir %r is not wxid_-prefixed "
+                            "(custom wechat id) — using candidate+verify "
+                            "resolution", d.name)
+                    try:
+                        self._keys[d.name] = self._resolve_keys_for_account(d, uin)
+                    except Exception as exc:       # noqa: BLE001
+                        logger.debug("V2 key resolution failed for %s: %s",
+                                     d.name, exc)
+                        self._keys[d.name] = derive_v2_keys(uin, d.name)
+
+    def _resolve_keys_for_account(self, account_dir: Path,
+                                  uin: int) -> tuple[str, int]:
+        """为单个账号目录解析 V2 密钥（候选 + 真实 V2 文件验证闭环）。
+
+        兼容性设计（对现有 wxid_ 账号零影响）：
+
+        - 首选候选 = 目录名剥 ``_XXXX`` 后缀，与旧逻辑的推导输入完全一致，
+          验证通过（或无法验证）时结果与旧行为相同；
+        - 只有当首选候选验证失败、且其他候选验证成功时才改变结果——
+          即验证闭环只可能把"解不出图"修正为"能解出图"，反之不可能；
+        - 找不到 V2 样本文件时直接返回旧推导结果，行为不变。
+
+        候选来源见 :meth:`_collect_wxid_candidates`。不做内存扫描。
+        """
+        dirname = account_dir.name
+        default_keys = derive_v2_keys(uin, dirname)
+
+        sample = self._find_v2_sample(account_dir)
+        if sample is None:
+            return default_keys
+        if _v2_key_works(sample, *default_keys):
+            return default_keys
+
+        for cand in self._collect_wxid_candidates(account_dir):
+            keys = _derive_keys_from_base(uin, cand)
+            if keys == default_keys:
+                continue
+            if _v2_key_works(sample, *keys):
+                logger.info(
+                    "V2 keys verified via alternative candidate for %s "
+                    "(base=%r, non-default key adopted)", dirname, cand)
+                return keys
+
+        logger.debug(
+            "V2 key verification found no working candidate for %s; "
+            "keeping default derivation", dirname)
+        return default_keys
+
+    def _find_v2_sample(self, account_dir: Path,
+                        max_candidates: int = 24) -> Optional[bytes]:
+        """从账号目录的收藏缓存里找一个 V2 样本文件（用于密钥验证）。
+
+        只认 V2 头（V1 用固定密钥 ``md5("0")``，无法用于验证候选）。
+        优先 ``thumb/``（文件最小、验证最快），按文件大小升序尝试，
+        最多读 ``max_candidates`` 个文件即止。
+        """
+        fav_dir = Path(account_dir) / 'business' / 'favorite'
+        if not fav_dir.is_dir():
+            return None
+        for sub in ('thumb', 'mid', 'data'):
+            base = fav_dir / sub
+            if not base.is_dir():
+                continue
+            try:
+                entries = sorted(base.rglob('*'), key=lambda p: p.stat().st_size)
+            except OSError:
+                continue
+            tried = 0
+            for f in entries:
+                try:
+                    if not f.is_file() or f.stat().st_size < 20:
+                        continue
+                except OSError:
+                    continue
+                tried += 1
+                if tried > max_candidates:
+                    break
+                raw = _read_dat_file(str(f))
+                if raw and raw[:6] == V2_MAGIC:
+                    return raw
+        return None
+
+    def _collect_wxid_candidates(self, account_dir: Path) -> list:
+        """收集密钥推导输入（wxid_base）候选，按优先级去重保序。
+
+        1) 目录名剥 ``_XXXX`` 后缀 —— 旧逻辑的默认推导输入；
+        2) 目录名本身（目录无后缀时与 1 相同）；
+        3) session.db ``Name2Id`` 表中的内部 wxid —— 自定义微信号账号的
+           真实内部 ID 只能从这里获得（参考 WeChatDataAnalysis 的做法，
+           已在本机实测：目录 ``wxid_***_d3e3`` → Name2Id 内为无后缀 ID）。
+        """
+        dirname = account_dir.name
+        base = dirname.rsplit('_', 1)[0] if '_' in dirname else dirname
+        candidates = [base]
+        if dirname != base:
+            candidates.append(dirname)
+        for wxid in self._name2id_internal_wxids(account_dir):
+            if wxid not in candidates:
+                candidates.append(wxid)
+        return candidates
+
+    def _name2id_internal_wxids(self, account_dir: Path,
+                                limit: int = 200) -> list:
+        """从 session.db 的 Name2Id 表提取内部 wxid 候选（失败返回空列表）。
+
+        Name2Id 里既有自己也有联系人，无法直接定位"自己"——但候选都会
+        经过真实 V2 文件解密验证，误候选不会被采纳，因此宽松收集是安全的。
+        上限 200 个：验证探针逐个试解，需要为最坏情况（无候选命中）兜底。
+        """
+        try:
+            session_db = Path(account_dir) / 'db_storage' / 'session' / 'session.db'
+            if not session_db.exists():
+                return []
+            from src.web.api_handlers import get_wcdb_client
+            client = get_wcdb_client()
+            if not client:
+                return []
+            rows = client.exec_query('session', db_path=str(session_db),
+                                     sql='SELECT user_name FROM Name2Id')
+            out = []
+            for r in rows or []:
+                u = str((r or {}).get('user_name', '') or '').strip()
+                if u.startswith('wxid_') and u not in out:
+                    out.append(u)
+                    if len(out) >= limit:
+                        break
+            return out
+        except Exception as exc:               # noqa: BLE001
+            logger.debug("Name2Id wxid candidates unavailable for %s: %s",
+                         getattr(account_dir, 'name', account_dir), exc)
+            return []
 
     def get_keys(self, wxid: str) -> Optional[tuple[str, int]]:
         """Get (aes_key, xor_key) for the given wxid.
@@ -566,13 +727,10 @@ class V2CacheManager:
         if not wxid:
             data_dir = os.getenv("WECHAT_DATA_DIR", "")
             if data_dir:
-                wxid_dirs = sorted(
-                    [d for d in Path(data_dir).iterdir()
-                     if d.is_dir() and d.name.startswith("wxid_")],
-                    key=lambda d: d.stat().st_mtime, reverse=True,
-                )
-                if wxid_dirs:
-                    wxid = wxid_dirs[0].name
+                from src.wechat.account_paths import list_account_dirs
+                account_dirs = list_account_dirs(Path(data_dir))
+                if account_dirs:
+                    wxid = account_dirs[0].name
 
         if not wxid:
             return None
@@ -711,11 +869,10 @@ class V2CacheManager:
                 data_dir = os.getenv('WECHAT_DATA_DIR', '')
                 if not data_dir:
                     return None
-                data_path = Path(data_dir)
-                for d in data_path.iterdir():
-                    if d.is_dir() and d.name.startswith('wxid_'):
-                        _get_reader_for_wxid(d.name)
-                        break
+                from src.wechat.account_paths import list_account_dirs
+                account_dirs = list_account_dirs(Path(data_dir))
+                if account_dirs:
+                    _get_reader_for_wxid(account_dirs[0].name)
 
             # Search across all favorite types (not just type=2 images)
             # because videos (type=4) and chat records (type=14) also have fullmd5
@@ -850,13 +1007,12 @@ class V2CacheManager:
                 if not data_dir:
                     return None
 
-                # Try each wxid
-                data_path = Path(data_dir)
-                for d in data_path.iterdir():
-                    if d.is_dir() and d.name.startswith('wxid_'):
-                        wxid = d.name
-                        _get_reader_for_wxid(wxid)
-                        break
+                # Try each account（结构识别，取最近使用的账号目录）
+                from src.wechat.account_paths import list_account_dirs
+                account_dirs = list_account_dirs(Path(data_dir))
+                if account_dirs:
+                    wxid = account_dirs[0].name
+                    _get_reader_for_wxid(wxid)
 
             # Search through cached readers (all types, not just type=2)
             for check_wxid, reader in _readers.items():

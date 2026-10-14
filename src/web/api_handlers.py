@@ -1303,19 +1303,15 @@ def _decrypt_fav_v2_media(local_id: int, fullmd5: str = "", fullsize: int = None
         import os as _os
         from pathlib import Path as _Path
 
-        # Auto-detect wxid
+        # Auto-detect wxid（结构识别账号目录，自定义微信号同样支持）
         data_dir = _os.getenv("WECHAT_DATA_DIR", "")
         if not data_dir:
             return None
-        wxid_dirs = sorted(
-            [d for d in _Path(data_dir).iterdir()
-             if d.is_dir() and d.name.startswith("wxid_")],
-            key=lambda d: d.stat().st_mtime,
-            reverse=True,
-        )
-        if not wxid_dirs:
+        from src.wechat.account_paths import list_account_dirs
+        account_dirs = list_account_dirs(_Path(data_dir))
+        if not account_dirs:
             return None
-        wxid = wxid_dirs[0].name
+        wxid = account_dirs[0].name
 
         manager = V2CacheManager.get_instance(data_dir)
         return manager.decrypt_fav_image(
@@ -1943,8 +1939,8 @@ def handle_chat_sessions(params, config: AssistantConfig):
 
         # Resolve folded state from Contact.flag.
         # WeChat 4.x stores fold state per-contact in the flag column:
-        #   Chatrooms: bit 28 (0x10000000) set → folded
-        #   Individuals (wxid_*): bit 9 (0x200) set → folded
+        #   Chatrooms/公众号: bit 28 (0x10000000) set → folded
+        #   Individuals (wxid_*/qq*/自定义微信号): bit 9 (0x200) set → folded
         # The DLL's get_contact_status only checks bit 28 (chatrooms),
         # so we query Contact.flag directly for all contacts.
         all_ids = [s.get("username", "") for s in sessions]
@@ -1981,10 +1977,10 @@ def handle_chat_sessions(params, config: AssistantConfig):
                         flag_val = flag_map.get(uname, 0)
                         if '@chatroom' in uname or uname.startswith('@') or uname.startswith('gh_'):
                             s["isFolded"] = bool(flag_val & 0x10000000)
-                        elif uname.startswith('wxid_') or uname.startswith('qq'):
-                            s["isFolded"] = bool(flag_val & 0x200)
                         else:
-                            s["isFolded"] = False
+                            # 个人号统一走 bit9 折叠位：wxid_*/qq*/自定义微信号
+                            # 均适用（4.x 自定义微信号账号的 username 就是微信号）
+                            s["isFolded"] = bool(flag_val & 0x200)
                         s["isMuted"] = False
                     logger.info("[API-TRACE] /api/chat/sessions: fold status from Contact.flag "
                                 "took %.0fms (%d contacts, %d folded)",
@@ -2760,14 +2756,12 @@ def _download_chat_media(messages: list[dict], export_dir: str, talker: str, my_
                 wxid = _wx
     except Exception:
         pass
-    # Fallback: scan data_dir for wxid_ directories
+    # Fallback: scan data_dir for account directories（结构识别，不依赖前缀）
     if not wxid and data_dir:
-        wxid_dirs = sorted(
-            [d for d in _P(data_dir).iterdir() if d.is_dir() and d.name.startswith("wxid_")],
-            key=lambda d: d.stat().st_mtime, reverse=True,
-        )
-        if wxid_dirs:
-            wxid = wxid_dirs[0].name
+        from src.wechat.account_paths import list_account_dirs
+        account_dirs = list_account_dirs(_P(data_dir))
+        if account_dirs:
+            wxid = account_dirs[0].name
 
     client = get_wcdb_client()
     manager = V2CacheManager.get_instance(data_dir) if data_dir else None

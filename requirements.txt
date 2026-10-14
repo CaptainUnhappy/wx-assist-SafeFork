@@ -19,6 +19,8 @@ silk-python>=0.2.0
 pycryptodome>=3.19.0
 APScheduler>=3.10.0
 zstandard>=0.22.0
+edge-tts>=7.0.0
+websockets>=11.0
 
 # wx4py — install from PyPI, only needed for WeChat 4.1.7-4.1.8 backend
 # pip install wx4py
