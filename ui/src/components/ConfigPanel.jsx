@@ -1061,7 +1061,7 @@ function CredentialsSection({ form, update }) {
           <div className="flex items-center gap-2">
             <button
               onClick={saveEdit}
-              disabled={!keyFormatOk || !wxidFormatOk || !dbPathFormatOk}
+              disabled={!keyFormatOk || !dbPathFormatOk}
               className="text-xs px-3 py-1.5 rounded-full bg-brand-green-hover text-white font-semibold hover:opacity-90 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default"
             >保存</button>
             <button
