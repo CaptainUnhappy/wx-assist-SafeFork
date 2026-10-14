@@ -23,6 +23,7 @@ from urllib.parse import unquote
 # Used in _handle_request() conditionals; must be imported at module level
 # to avoid UnboundLocalError in branches that reference it.
 from src.config import _decode_wechat_groups
+from src.wechat.account_paths import find_account_base_from_dbpath, list_account_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ def _find_or_create_env() -> Path:
 
 
 def _detect_default_data_dir() -> str:
-    """Auto-detect the default WeChat data directory (parent of wxid_*).
+    """Auto-detect the default WeChat data directory (parent of account dirs).
 
     Returns the base directory path string, or empty string if not found.
     Used by the UI to show what auto-detection would use.
@@ -95,11 +96,9 @@ def _detect_default_data_dir() -> str:
         if not base.exists():
             continue
         try:
-            wxid_dirs = [d for d in base.iterdir() if d.is_dir() and d.name.startswith("wxid_")]
-            for wxid_dir in wxid_dirs:
-                session_db = wxid_dir / "db_storage" / "session" / "session.db"
-                if session_db.exists():
-                    return str(base)
+            # 结构识别账号目录（不依赖 wxid_ 前缀，自定义微信号同样支持）
+            if list_account_dirs(base):
+                return str(base)
         except PermissionError:
             continue
     return ""
@@ -111,7 +110,7 @@ def _detect_wxid_and_db_path():
     Respects WECHAT_DATA_DIR env var as a custom base dir (scanned first).
 
     Returns (wxid, db_path, base_dir) where base_dir is the wechat_data_dir
-    (the parent directory containing wxid_* folders).
+    (the parent directory containing WeChat account folders).
     """
     import os as _os
 
@@ -132,20 +131,17 @@ def _detect_wxid_and_db_path():
     for base in candidates:
         if not base.exists():
             continue
-        wxid_dirs = sorted(
-            [d for d in base.iterdir() if d.is_dir() and d.name.startswith("wxid_")],
-            key=lambda d: d.stat().st_mtime, reverse=True,
-        )
-        for wxid_dir in wxid_dirs:
-            session_db = wxid_dir / "db_storage" / "session" / "session.db"
+        # 结构识别账号目录（不依赖 wxid_ 前缀），按最近登录排序
+        for account_dir in list_account_dirs(base):
+            session_db = account_dir / "db_storage" / "session" / "session.db"
             if session_db.exists():
-                return wxid_dir.name, str(session_db), str(base)
+                return account_dir.name, str(session_db), str(base)
             # Older WeChat versions
-            msg_dir = wxid_dir / "Msg"
+            msg_dir = account_dir / "Msg"
             if msg_dir.exists():
                 db_files = sorted(msg_dir.glob("MSG*.db"), key=lambda f: f.stat().st_mtime, reverse=True)
                 if db_files:
-                    return wxid_dir.name, str(db_files[0]), str(base)
+                    return account_dir.name, str(db_files[0]), str(base)
     return None, None, None
 
 
@@ -156,20 +152,16 @@ def _set_env_key(env_path: Path, key: str, value: str) -> None:
 
 
 def _infer_data_dir_from_dbpath(db_path: str) -> str:
-    """From a db_path, walk up parent dirs to find a wxid_* directory,
-    then return its parent (the wechat_data_dir).
+    """From a db_path, locate the enclosing WeChat account directory
+    (identified by internal structure, not by name), then return its
+    parent (the wechat_data_dir).
 
     Returns empty string if the path isn't in a standard WeChat layout.
     """
     try:
-        p = Path(db_path).resolve().parent
-        while p.parent != p:
-            if p.name.startswith("wxid_"):
-                return str(p.parent)
-            p = p.parent
+        return find_account_base_from_dbpath(db_path)
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _write_onboarding_to_env(env_path):
@@ -1930,10 +1922,9 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 else:
                     checks["key_format"] = {"ok": True}
 
-                # 2. wxid format
-                if wxid and not wxid.startswith("wxid_"):
-                    checks["wxid_format"] = {"ok": False, "message": "账号标识应以 wxid_ 开头"}
-                elif not wxid:
+                # 2. wxid format — 微信 4.x 支持自定义微信号作为账号标识
+                # （目录名 = 微信号 + 4位hex后缀），不再要求 wxid_ 前缀
+                if not wxid:
                     checks["wxid_format"] = {"ok": False, "message": "账号标识未配置"}
                 else:
                     checks["wxid_format"] = {"ok": True}
@@ -3077,16 +3068,14 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     self.send_json({"ok": False, "error": f"目录不存在: {dir_path}"})
                     return
 
-                # Scan for wxid_* directories
-                wxid_dirs = sorted(
-                    [d for d in target.iterdir() if d.is_dir() and d.name.startswith("wxid_")],
-                    key=lambda d: d.stat().st_mtime, reverse=True,
-                )
+                # 结构识别微信账号目录（不再要求 wxid_ 前缀，
+                # 以自定义微信号命名的账号同样可识别）
+                account_dirs = list_account_dirs(target)
                 accounts = []
-                for wxid_dir in wxid_dirs:
-                    session_db = wxid_dir / "db_storage" / "session" / "session.db"
+                for account_dir in account_dirs:
+                    session_db = account_dir / "db_storage" / "session" / "session.db"
                     accounts.append({
-                        "wxid": wxid_dir.name,
+                        "wxid": account_dir.name,
                         "has_session_db": session_db.exists(),
                         "db_path": str(session_db) if session_db.exists() else "",
                     })
@@ -3103,7 +3092,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                         "ok": True,
                         "found": False,
                         "accounts": [],
-                        "message": f"在 {dir_path} 中未找到 wxid_* 目录。请确认路径正确。",
+                        "message": f"在 {dir_path} 中未找到微信账号文件夹。请确认路径正确"
+                                   f"（应包含以微信号命名的账号文件夹）。",
                     })
             except Exception as e:
                 logger.exception("Failed to detect WeChat data dir")
@@ -3762,14 +3752,9 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 if not wxid:
                     if data_dir:
                         from pathlib import Path as _Path
-                        wxid_dirs = sorted(
-                            [d for d in _Path(data_dir).iterdir()
-                             if d.is_dir() and d.name.startswith("wxid_")],
-                            key=lambda d: d.stat().st_mtime,
-                            reverse=True,
-                        )
-                        if wxid_dirs:
-                            wxid = wxid_dirs[0].name
+                        account_dirs = list_account_dirs(_Path(data_dir))
+                        if account_dirs:
+                            wxid = account_dirs[0].name
 
                 if not wxid:
                     self.send_response(404)

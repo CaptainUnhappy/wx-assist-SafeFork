@@ -1015,7 +1015,7 @@ function CredentialsSection({ form, update }) {
 
   // Format validation for test connection
   const keyFormatOk = !draft.wcdb_key || (draft.wcdb_key.length === 64 && /^[0-9a-fA-F]+$/.test(draft.wcdb_key))
-  const wxidFormatOk = !draft.wxid || draft.wxid.startsWith('wxid_')
+  // 微信 4.x 支持自定义微信号作为账号标识，不再校验 wxid_ 前缀
   const dbPathFormatOk = !draft.db_path || draft.db_path.length > 0
 
   async function testConnection() {
@@ -1136,8 +1136,8 @@ function CredentialsSection({ form, update }) {
               {form.wxid || '—'}
             </div>
           )}
-          {editing && draft.wxid && !wxidFormatOk && (
-            <p className="text-xs text-status-error mt-1">❌ 账号标识应以 wxid_ 开头</p>
+          {editing && !draft.wxid && (
+            <p className="text-xs text-status-warn mt-1">⚠ 留空将无法自动定位账号目录，建议填写</p>
           )}
         </div>
 
@@ -1522,7 +1522,7 @@ function DataPathSection({ form, update, detectedDataDir }) {
   return (
     <div>
       <Field label="微信数据目录"
-        hint="微信聊天记录存储的父目录（包含 wxid_* 文件夹）。留空则自动从 Documents 检测。">
+        hint="微信聊天记录存储的父目录（包含以微信号命名的账号文件夹）。留空则自动从 Documents 检测。">
         <div className="flex items-start gap-2">
           <div className="flex-1 relative">
             <input
@@ -1620,7 +1620,7 @@ function DataPathSection({ form, update, detectedDataDir }) {
       )}
       {!detectedDataDir && !hasCustomPath && (
         <p className="text-xs text-text-muted mt-3 leading-relaxed">
-          ⚠ 未检测到默认微信数据目录，请手动指定包含 <code className="bg-bg-raised px-1.5 py-0.5 rounded font-mono text-xs">wxid_*</code> 文件夹的父目录
+          ⚠ 未检测到默认微信数据目录，请手动指定包含微信账号文件夹（以微信号命名）的父目录
         </p>
       )}
       {hasCustomPath && (

@@ -630,11 +630,17 @@ def _detect_wechat_data_dir() -> str:
         / "xwechat_files"
     )
     candidates = []
-    for session_db in base.glob("wxid_*/db_storage/session/session.db"):
-        try:
-            candidates.append((session_db.stat().st_mtime, session_db.parent.parent.parent))
-        except OSError:
-            continue
+    # 结构识别账号目录（不依赖 wxid_ 前缀，自定义微信号账号同样支持）
+    if base.is_dir():
+        for entry in base.iterdir():
+            if not entry.is_dir():
+                continue
+            session_db = entry / "db_storage" / "session" / "session.db"
+            try:
+                if session_db.exists():
+                    candidates.append((session_db.stat().st_mtime, entry))
+            except OSError:
+                continue
     if not candidates:
         return ""
     candidates.sort(reverse=True)
