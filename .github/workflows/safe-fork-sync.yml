@@ -28,9 +28,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      SAFEFORK_TEMPLATE_VERSION: "2026-10-05.1"
+      SAFEFORK_TEMPLATE_VERSION: "2026-10-15.1"
       GH_TOKEN: ${{ github.token }}
+      SYNC_MODE: ${{ vars.SAFEFORK_MODE || 'public-fork' }}
       UPSTREAM_REPO: ${{ vars.SAFEFORK_UPSTREAM }}
+      UPSTREAM_ID: ${{ vars.SAFEFORK_UPSTREAM_ID }}
+      UPSTREAM_TOKEN: ${{ secrets.SAFEFORK_UPSTREAM_TOKEN }}
       CONTROL_BRANCH: ${{ github.event.repository.default_branch }}
       PRIMARY_BRANCH: ${{ vars.SAFEFORK_PRIMARY_BRANCH || 'main' }}
       MIN_FILE_PERCENT: ${{ vars.SAFEFORK_MIN_FILE_PERCENT || '40' }}
@@ -41,7 +44,7 @@ jobs:
       - name: Plan, validate, and synchronize safe Git refs
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           push_dir=
           writes=0
 
@@ -63,12 +66,63 @@ jobs:
 
           report "SafeFork template version: $SAFEFORK_TEMPLATE_VERSION"
 
+          read_api() {
+            local repo=$1 route=$2 token=$GH_TOKEN
+            shift 2
+            if [ "$SYNC_MODE" = "standalone-private" ] && [ "$repo" = "$UPSTREAM_REPO" ]; then
+              token=$UPSTREAM_TOKEN
+            fi
+            GH_TOKEN="$token" gh api --method GET "repos/$repo${route:+/$route}" "$@"
+          }
+
+          validate_repositories() {
+            local target source name id private visibility fork parent parent_id default_branch
+            # Validate the destination before reading any private source metadata.
+            target=$(read_api "$GITHUB_REPOSITORY" "" --jq '[.full_name, .id, .private, .visibility, .fork, (.parent.full_name // "-"), (.parent.id // 0), .default_branch] | @tsv')
+            target=${target%$'\r'}
+            IFS=$'\t' read -r name id private visibility fork parent parent_id default_branch <<< "$target"
+            if [ "$name" != "$GITHUB_REPOSITORY" ] || [ "$id" != "$GITHUB_REPOSITORY_ID" ] ||
+               [ "$default_branch" != "$CONTROL_BRANCH" ]; then
+              report "::error::Target repository identity or default branch changed; manual review required."
+              return 1
+            fi
+            case "$SYNC_MODE" in
+              public-fork)
+                if [ "$private" != "false" ] || [ "$visibility" != "public" ] ||
+                   [ "$fork" != "true" ] || [ "$parent" != "$UPSTREAM_REPO" ]; then
+                  report "::error::Public Fork visibility or parent differs from the configured storage model."
+                  return 1
+                fi ;;
+              standalone-private)
+                if [ "$private" != "true" ] || [ "$visibility" != "private" ] ||
+                   [ "$fork" != "false" ] || [ "$parent" != "-" ] || [ "$parent_id" != "0" ]; then
+                  report "::error::Standalone private backup must remain private and outside any Fork network."
+                  return 1
+                fi ;;
+            esac
+            source=$(read_api "$UPSTREAM_REPO" "" --jq '[.full_name, .id, .private, .visibility] | @tsv')
+            source=${source%$'\r'}
+            IFS=$'\t' read -r name id private visibility <<< "$source"
+            if [ "$name" != "$UPSTREAM_REPO" ] ||
+               { [ "$SYNC_MODE" = "public-fork" ] && { [ "$id" != "$parent_id" ] || [ "$private" != "false" ] || [ "$visibility" != "public" ]; }; } ||
+               { [ "$SYNC_MODE" = "standalone-private" ] && { [ "$id" != "$UPSTREAM_ID" ] || [ "$private" != "true" ] || [ "$visibility" != "private" ]; }; }; then
+              report "::error::Upstream identity or visibility differs from the configured storage model."
+              return 1
+            fi
+            if [ -n "${locked_target:-}" ] && { [ "$target" != "$locked_target" ] || [ "$source" != "$locked_source" ]; }; then
+              report "::error::Repository metadata changed during planning; manual review required."
+              return 1
+            fi
+            locked_target=$target
+            locked_source=$source
+          }
+
           list_refs() {
-            gh api "repos/$1/git/matching-refs/$2/" --paginate --jq '.[] | [.ref, .object.sha] | @tsv'
+            read_api "$1" "git/matching-refs/$2/" --paginate --jq '.[] | [.ref, .object.sha] | @tsv'
           }
 
           count_files() {
-            gh api "repos/$1/git/trees/$2?recursive=1" --jq '
+            read_api "$1" "git/trees/$2?recursive=1" --jq '
               if .truncated == false then
                 [.tree[] | select(.type == "blob")] | length
               else error("The recursive tree is truncated.") end'
@@ -101,6 +155,7 @@ jobs:
           }
 
           configure_push() {
+            [ -z "$push_dir" ] || return 0
             if [ -z "${GH_TOKEN:-}" ]; then
               report "::error::Writes are planned, but the repository GITHUB_TOKEN is unavailable."
               return 1
@@ -115,6 +170,7 @@ jobs:
           esac
           EOF
             chmod 700 "$push_dir/askpass"
+            mkdir "$push_dir/hooks"
             git -C "$push_dir" init --bare --quiet
             export GIT_ASKPASS="$push_dir/askpass"
             export GIT_ASKPASS_REQUIRE=force
@@ -122,17 +178,38 @@ jobs:
             report "Write transport: repository GITHUB_TOKEN; GitHub suppresses downstream push-workflow runs."
           }
 
+          fetch_locked() {
+            local repo=$1 kind=$2 name=$3 expected=$4 staged=$5 token=$GH_TOKEN actual
+            if [ "$SYNC_MODE" = "standalone-private" ] && [ "$repo" = "$UPSTREAM_REPO" ]; then
+              token=$UPSTREAM_TOKEN
+            fi
+            # Each endpoint gets its own credentials; no checkout or shallow history.
+            GH_TOKEN="$token" git -C "$push_dir" -c credential.helper= -c core.hooksPath="$push_dir/hooks" fetch --quiet --no-tags "https://github.com/$repo.git" "refs/$kind/$name:$staged"
+            actual=$(git -C "$push_dir" rev-parse "$staged")
+            if [ "$actual" != "$expected" ]; then
+              report "::error::$kind/$name fetched SHA differs from the locked snapshot SHA."
+              return 1
+            fi
+          }
+
+          verify_ancestry() {
+            local branch=$1 target_sha=$2 source_sha=$3
+            configure_push
+            fetch_locked "$GITHUB_REPOSITORY" heads "$branch" "$target_sha" "refs/safefork/target/heads/$branch"
+            fetch_locked "$UPSTREAM_REPO" heads "$branch" "$source_sha" "refs/safefork/heads/$branch"
+            if ! git -C "$push_dir" merge-base --is-ancestor "$target_sha" "$source_sha"; then
+              report "::error::Branch $branch is not a safe fast-forward (local ancestry check); zero writes."
+              return 1
+            fi
+          }
+
           push_ref() {
             local kind=$1 name=$2 expected=$3 staged actual
             staged="refs/safefork/$kind/$name"
-            # Ordinary push needs complete ancestry to prove a fast-forward.
-            git -C "$push_dir" fetch --quiet --no-tags "https://github.com/$UPSTREAM_REPO.git" "refs/$kind/$name:$staged"
             actual=$(git -C "$push_dir" rev-parse "$staged")
-            if [ "$actual" != "$expected" ]; then
-              report "::error::$kind/$name fetched SHA differs from the locked source SHA."
-              return 1
-            fi
-            if ! git -C "$push_dir" push --quiet "https://github.com/$GITHUB_REPOSITORY.git" "$staged:refs/$kind/$name"; then
+            [ "$actual" = "$expected" ]
+            validate_repositories
+            if ! git -C "$push_dir" -c credential.helper= -c core.hooksPath="$push_dir/hooks" push --quiet "https://github.com/$GITHUB_REPOSITORY.git" "$staged:refs/$kind/$name"; then
               report "::error::Push was rejected; SafeFork will not fall back to a deploy key or PAT because those credentials can trigger inherited workflows."
               return 1
             fi
@@ -141,15 +218,28 @@ jobs:
             verify_ref "$kind/$name" "$expected"
           }
 
-          if [ -z "$UPSTREAM_REPO" ]; then
-            report "::error::SAFEFORK_UPSTREAM is not configured."
+          # Validate configuration before any network access.
+          SYNC_MODE=${SYNC_MODE:-public-fork}
+          if ! [[ "$UPSTREAM_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+             [ "$UPSTREAM_REPO" = "$GITHUB_REPOSITORY" ]; then
+            report "::error::SAFEFORK_UPSTREAM must name a different owner/repository."
             exit 1
           fi
-          parent=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.parent.full_name // empty')
-          if [ "$parent" != "$UPSTREAM_REPO" ]; then
-            report "::error::Fork parent differs from SAFEFORK_UPSTREAM; manual review required."
+          if [ -z "${GH_TOKEN:-}" ] || ! [[ "${GITHUB_REPOSITORY_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+            report "::error::The repository GITHUB_TOKEN is unavailable or the target repository ID is invalid."
             exit 1
           fi
+          case "$SYNC_MODE" in
+            public-fork) ;;
+            standalone-private)
+              if [ -z "${UPSTREAM_TOKEN:-}" ] || ! [[ "${UPSTREAM_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+                report "::error::Standalone private mode requires SAFEFORK_UPSTREAM_TOKEN and a pinned SAFEFORK_UPSTREAM_ID."
+                exit 1
+              fi ;;
+            *) report "::error::Unknown SAFEFORK_MODE; refusing to guess a storage model."; exit 1 ;;
+          esac
+          validate_repositories
+          report "Storage mode: $SYNC_MODE; repository identity and visibility verified."
 
           upstream_heads_raw=$(list_refs "$UPSTREAM_REPO" heads)
           upstream_tags_raw=$(list_refs "$UPSTREAM_REPO" tags)
@@ -220,10 +310,14 @@ jobs:
 
             target_sha=${fork_heads[$branch]}
             [ "$target_sha" = "$source_sha" ] && continue
-            relation=$(gh api "repos/$GITHUB_REPOSITORY/compare/$target_sha...$source_sha" --jq '.status')
-            if [ "$relation" != "ahead" ]; then
-              report "::error::Branch $branch is not a safe fast-forward ($relation); zero writes."
-              exit 1
+            if [ "$SYNC_MODE" = "standalone-private" ]; then
+              verify_ancestry "$branch" "$target_sha" "$source_sha"
+            else
+              relation=$(gh api "repos/$GITHUB_REPOSITORY/compare/$target_sha...$source_sha" --jq '.status')
+              if [ "$relation" != "ahead" ]; then
+                report "::error::Branch $branch is not a safe fast-forward ($relation); zero writes."
+                exit 1
+              fi
             fi
 
             if [ "$branch" = "$PRIMARY_BRANCH" ]; then
@@ -267,10 +361,16 @@ jobs:
           done
 
           report "Plan: ${#create_branches[@]} new branches, ${#update_branches[@]} fast-forwards, ${#create_tags[@]} new tags."
-          if [ "$DRY_RUN" = "true" ]; then
-            report "Dry-run complete: zero writes."
-            exit 0
-          fi
+          planned_writes=$((${#create_branches[@]} + ${#update_branches[@]} + ${#create_tags[@]}))
+          [ "$planned_writes" -eq 0 ] || configure_push
+          # Fetch and lock every planned object before the first target write.
+          for branch in "${update_branches[@]}" "${create_branches[@]}"; do
+            fetch_locked "$UPSTREAM_REPO" heads "$branch" "${upstream_heads[$branch]}" "refs/safefork/heads/$branch"
+          done
+          for tag in "${create_tags[@]}"; do
+            fetch_locked "$UPSTREAM_REPO" tags "$tag" "${upstream_tags[$tag]}" "refs/safefork/tags/$tag"
+          done
+          validate_repositories
 
           latest_upstream_heads=$(list_refs "$UPSTREAM_REPO" heads)
           latest_upstream_tags=$(list_refs "$UPSTREAM_REPO" tags)
@@ -279,8 +379,6 @@ jobs:
             report "::error::Upstream refs changed during planning; run again."
             exit 1
           fi
-
-          planned_writes=$((${#create_branches[@]} + ${#update_branches[@]} + ${#create_tags[@]}))
 
           # Recheck every planned target before the first write. Ordinary pushes
           # remain the final race-safe guard if a ref changes after this snapshot.
@@ -306,7 +404,10 @@ jobs:
             fi
           done
 
-          [ "$planned_writes" -eq 0 ] || configure_push
+          if [ "$DRY_RUN" = "true" ]; then
+            report "Dry-run complete: zero writes."
+            exit 0
+          fi
 
           for branch in "${update_branches[@]}"; do
             source_sha=${upstream_heads[$branch]}
