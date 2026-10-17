@@ -234,6 +234,9 @@ class BotConfig:
     # 千问流式 TTS（A 档 tts_provider=qwen 时使用，WebSocket，Key 复用 VOICE_REALTIME_API_KEY）
     voice_tts_qwen_model: str = "qwen3-tts-flash-realtime"
     voice_tts_qwen_voice: str = "Cherry"
+    # edge-tts 语速（仅 A 档 edge-tts 生效；B 档端到端语速由模型决定不可调），
+    # 格式如 "+15%" / "-10%"，默认 "+0%" 即不变速
+    voice_tts_rate: str = "+0%"
 
     # === Voice Realtime（B 档：端到端全双工通话）===
     # 语音助手总开关：关闭后网页不再显示麦克风入口（与 A/B 通道开关独立）。
@@ -372,6 +375,8 @@ def load_config() -> BotConfig:
                                  or "qwen3-tts-flash-realtime"),
         "voice_tts_qwen_voice": (os.getenv("VOICE_TTS_QWEN_VOICE", "Cherry").strip()
                                  or "Cherry"),
+        # edge-tts 语速（仅 A 档 edge-tts 生效）：形如 +15% / -10%，为空回落 +0%
+        "voice_tts_rate": (os.getenv("VOICE_TTS_RATE", "+0%").strip() or "+0%"),
         # Voice Realtime（B 档）
         "voice_assistant_enabled": os.getenv("VOICE_ENABLED", "true").strip().lower() != "false",
         "voice_realtime_enabled": os.getenv("VOICE_REALTIME_ENABLED", "false").strip().lower() == "true",

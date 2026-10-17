@@ -1860,6 +1860,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     "tts_voice": cfg.voice_tts_voice,
                     "tts_qwen_model": cfg.voice_tts_qwen_model,
                     "tts_qwen_voice": cfg.voice_tts_qwen_voice,
+                    # 仅 A 档 edge-tts 生效，B 档语速由端到端模型决定
+                    "tts_rate": getattr(cfg, "voice_tts_rate", "+0%") or "+0%",
                 })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
@@ -1874,6 +1876,12 @@ class _UIHandler(SimpleHTTPRequestHandler):
 
                 def s(key, default):
                     return str(body.get(key) or default).strip()
+
+                import re
+                # 语速仅 A 档 edge-tts 生效；非法值（须形如 +15% / -10%）回落 +0%
+                tts_rate = s("tts_rate", "+0%")
+                if not re.match(r"^[+-]?\d{1,3}%$", tts_rate):
+                    tts_rate = "+0%"
 
                 # 根据模型家族给出合法默认音色（omni=Tina，audio=longanqian）
                 model = s("model", "qwen3.8-omni-flash-realtime")
@@ -1907,6 +1915,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     "VOICE_TTS_QWEN_MODEL":
                         s("tts_qwen_model", "qwen3-tts-flash-realtime"),
                     "VOICE_TTS_QWEN_VOICE": s("tts_qwen_voice", "Cherry"),
+                    # 仅 A 档 edge-tts 生效（已做格式校验，非法回落 +0%）
+                    "VOICE_TTS_RATE": tts_rate,
                 }
                 # 各类 Key：留空/占位时不覆盖
                 for body_key, env_key in (
@@ -1990,7 +2000,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 return
             try:
                 from src.voice.providers import synthesize
-                audio, audio_type = synthesize(text[:1000], voice=voice)
+                from src.config import load_config
+                # A 档 edge-tts 语速（仅 edge 通道生效，其它通道内部忽略该参数）
+                rate = getattr(load_config(), "voice_tts_rate", "+0%") or "+0%"
+                audio, audio_type = synthesize(text[:1000], voice=voice, rate=rate)
                 self.send_response(200)
                 self.send_header("Content-Type", audio_type)
                 self.send_header("Content-Length", str(len(audio)))

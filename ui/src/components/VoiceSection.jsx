@@ -137,6 +137,7 @@ export default function VoiceSection() {
   const [ttsModel, setTtsModel] = useState('tts-1')
   const [ttsVoice, setTtsVoice] = useState('zh-CN-XiaoxiaoNeural')
   const [qwenTtsVoice, setQwenTtsVoice] = useState('Cherry')
+  const [ttsRate, setTtsRate] = useState('+0%')
 
   useEffect(() => {
     fetch(`${API_BASE}/api/voice/realtime/config`)
@@ -166,6 +167,7 @@ export default function VoiceSection() {
         setTtsModel(d.tts_model || 'tts-1')
         setTtsVoice(d.tts_voice || 'zh-CN-XiaoxiaoNeural')
         setQwenTtsVoice(d.tts_qwen_voice || 'Cherry')
+        setTtsRate(d.tts_rate || '+0%')
         // 任一厂商已启用就默认展开 B 档
         const anyB = !!(d.qwen_enabled || d.volc_enabled)
         setOpenB(anyB); setOpenA(!anyB)
@@ -209,6 +211,8 @@ export default function VoiceSection() {
       tts_provider: ttsProvider, tts_base_url: ttsBaseUrl,
       tts_api_key: ttsApiKey || '********', tts_model: ttsModel,
       tts_voice: ttsVoice, tts_qwen_voice: qwenTtsVoice,
+      // edge-tts 语速（仅 A 档 Edge 生效）
+      tts_rate: ttsRate,
     }
   }
 
@@ -338,6 +342,11 @@ export default function VoiceSection() {
                       { value: 'volc', label: '火山豆包 Seeduplex' },
                     ]} />
                 </Field>
+
+                {/* B 档语速不可调：端到端模型自行决定，避免用户误以为能像 A 档那样设置 */}
+                <div className="rounded-xl bg-bg-raised px-3.5 py-2.5 text-[12px] leading-5 text-text-muted">
+                  语速由实时模型（端到端）自行决定，不可调整；如需变速请在 A 档选择 Edge 合成。
+                </div>
 
                 {/* 当前生效通道明示：服务端状态为唯一来源，避免"以为用 B 实际走 A" */}
                 {providerDirty ? (
@@ -544,16 +553,27 @@ export default function VoiceSection() {
                       { value: 'openai', label: 'OpenAI 兼容' },
                     ]} />
                   {ttsProvider === 'edge' && (
-                    <Field label="Edge 音色">
-                      <Select variant="stack" value={ttsVoice} onChange={setTtsVoice} options={[
-                        { value: 'zh-CN-XiaoxiaoNeural', desc: '晓晓 · 女声（默认）' },
-                        { value: 'zh-CN-YunxiNeural', desc: '云希 · 男声' },
-                        { value: 'zh-CN-XiaoyiNeural', desc: '晓伊 · 女声' },
-                        { value: 'zh-CN-YunyangNeural', desc: '云扬 · 男声' },
-                        { value: 'zh-CN-XiaoxuanNeural', desc: '晓萱 · 女声' },
-                        { value: 'zh-CN-YunjianNeural', desc: '云健 · 男声' },
-                      ]} />
-                    </Field>
+                    <>
+                      <Field label="Edge 音色">
+                        <Select variant="stack" value={ttsVoice} onChange={setTtsVoice} options={[
+                          { value: 'zh-CN-XiaoxiaoNeural', desc: '晓晓 · 女声（默认）' },
+                          { value: 'zh-CN-YunxiNeural', desc: '云希 · 男声' },
+                          { value: 'zh-CN-XiaoyiNeural', desc: '晓伊 · 女声' },
+                          { value: 'zh-CN-YunyangNeural', desc: '云扬 · 男声' },
+                          { value: 'zh-CN-XiaoxuanNeural', desc: '晓萱 · 女声' },
+                          { value: 'zh-CN-YunjianNeural', desc: '云健 · 男声' },
+                        ]} />
+                      </Field>
+                      <Field label="语速（仅 Edge 生效）">
+                        <Select variant="stack" value={ttsRate} onChange={setTtsRate} options={[
+                          { value: '-20%', desc: '慢 · -20%' },
+                          { value: '-10%', desc: '略慢 · -10%' },
+                          { value: '+0%', desc: '默认 · 不变速' },
+                          { value: '+15%', desc: '略快 · +15%' },
+                          { value: '+30%', desc: '快 · +30%' },
+                        ]} />
+                      </Field>
+                    </>
                   )}
                   {ttsProvider === 'qwen' && (
                     <div className="space-y-3 rounded-xl bg-bg-raised p-3.5">
