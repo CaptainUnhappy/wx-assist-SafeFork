@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      SAFEFORK_TEMPLATE_VERSION: "2026-10-15.1"
+      SAFEFORK_TEMPLATE_VERSION: "2026-10-17.1"
       GH_TOKEN: ${{ github.token }}
       SYNC_MODE: ${{ vars.SAFEFORK_MODE || 'public-fork' }}
       UPSTREAM_REPO: ${{ vars.SAFEFORK_UPSTREAM }}
@@ -39,6 +39,7 @@ jobs:
       MIN_FILE_PERCENT: ${{ vars.SAFEFORK_MIN_FILE_PERCENT || '40' }}
       MIN_FILE_COUNT: ${{ vars.SAFEFORK_MIN_FILE_COUNT || '3' }}
       PRESERVED_TAGS: ${{ vars.SAFEFORK_PRESERVED_TAGS }}
+      BRANCH_MAP: ${{ vars.SAFEFORK_BRANCH_MAP }}
       DRY_RUN: ${{ inputs.dry_run || false }}
     steps:
       - name: Plan, validate, and synchronize safe Git refs
@@ -193,9 +194,9 @@ jobs:
           }
 
           verify_ancestry() {
-            local branch=$1 target_sha=$2 source_sha=$3
+            local branch=$1 target_branch=$2 target_sha=$3 source_sha=$4
             configure_push
-            fetch_locked "$GITHUB_REPOSITORY" heads "$branch" "$target_sha" "refs/safefork/target/heads/$branch"
+            fetch_locked "$GITHUB_REPOSITORY" heads "$target_branch" "$target_sha" "refs/safefork/target/heads/$target_branch"
             fetch_locked "$UPSTREAM_REPO" heads "$branch" "$source_sha" "refs/safefork/heads/$branch"
             if ! git -C "$push_dir" merge-base --is-ancestor "$target_sha" "$source_sha"; then
               report "::error::Branch $branch is not a safe fast-forward (local ancestry check); zero writes."
@@ -204,18 +205,18 @@ jobs:
           }
 
           push_ref() {
-            local kind=$1 name=$2 expected=$3 staged actual
+            local kind=$1 name=$2 expected=$3 target_name=${4:-$2} staged actual
             staged="refs/safefork/$kind/$name"
             actual=$(git -C "$push_dir" rev-parse "$staged")
             [ "$actual" = "$expected" ]
             validate_repositories
-            if ! git -C "$push_dir" -c credential.helper= -c core.hooksPath="$push_dir/hooks" push --quiet "https://github.com/$GITHUB_REPOSITORY.git" "$staged:refs/$kind/$name"; then
+            if ! git -C "$push_dir" -c credential.helper= -c core.hooksPath="$push_dir/hooks" push --quiet "https://github.com/$GITHUB_REPOSITORY.git" "$staged:refs/$kind/$target_name"; then
               report "::error::Push was rejected; SafeFork will not fall back to a deploy key or PAT because those credentials can trigger inherited workflows."
               return 1
             fi
             writes=$((writes + 1))
-            report "Pushed ref: $kind/$name -> $expected; verifying."
-            verify_ref "$kind/$name" "$expected"
+            report "Pushed ref: $kind/$target_name -> $expected; verifying."
+            verify_ref "$kind/$target_name" "$expected"
           }
 
           # Validate configuration before any network access.
@@ -238,6 +239,31 @@ jobs:
               fi ;;
             *) report "::error::Unknown SAFEFORK_MODE; refusing to guess a storage model."; exit 1 ;;
           esac
+          # A mapping reserves its destination and freezes the old same-name
+          # target branch, even when the source branch later disappears.
+          declare -A branch_map=() mapped_destinations=() destinations=()
+          mapping_config=${BRANCH_MAP:-}
+          while read -r branch target_branch extra; do
+            [ -n "$branch" ] || continue
+            if [ -n "$extra" ] || [ -z "$target_branch" ] || [ "$branch" = "$target_branch" ] ||
+               ! git check-ref-format "refs/heads/$branch" || ! git check-ref-format "refs/heads/$target_branch" ||
+               [ "$branch" = "$CONTROL_BRANCH" ] || [ "$target_branch" = "$CONTROL_BRANCH" ] ||
+               [ -n "${branch_map[$branch]+present}" ] || [ -n "${mapped_destinations[$target_branch]+present}" ]; then
+              report "::error::Invalid or duplicate SAFEFORK_BRANCH_MAP entry; expected: source-branch target-branch."
+              exit 1
+            fi
+            branch_map["$branch"]=$target_branch
+            mapped_destinations["$target_branch"]=$branch
+          done <<< "${mapping_config//$'\r'/}"
+          for branch in "${!branch_map[@]}"; do
+            target_branch=${branch_map[$branch]}
+            if [ -n "${branch_map[$target_branch]+present}" ]; then
+              report "::error::Mapped destination $target_branch is reserved as an archived same-name branch."
+              exit 1
+            fi
+            report "Branch mapping: $branch -> $target_branch; preserve old target $branch."
+          done
+
           validate_repositories
           report "Storage mode: $SYNC_MODE; repository identity and visibility verified."
 
@@ -300,25 +326,45 @@ jobs:
             exit 1
           fi
 
+          # Resolve all routes before planning any writes, including collisions
+          # with an unmapped source or an existing target ref's namespace.
           for branch in "${!upstream_heads[@]}"; do
+            target_branch=${branch_map[$branch]-$branch}
+            if [ -n "${mapped_destinations[$target_branch]+present}" ] &&
+               [ "${mapped_destinations[$target_branch]}" != "$branch" ]; then
+              report "::error::Upstream branch $branch collides with reserved mapped destination $target_branch."
+              exit 1
+            fi
+            destinations["$target_branch"]=$branch
+          done
+          for target_branch in "${!destinations[@]}"; do
+            for other in "${!destinations[@]}" "${!fork_heads[@]}" "$CONTROL_BRANCH"; do
+              if [[ "$target_branch" == "$other/"* || "$other" == "$target_branch/"* ]]; then
+                report "::error::Target branch namespace collision: $target_branch and $other."
+                exit 1
+              fi
+            done
+          done
+
+          for branch in "${!upstream_heads[@]}"; do
+            target_branch=${branch_map[$branch]-$branch}
             source_sha=${upstream_heads[$branch]}
-            if [ -z "${fork_heads[$branch]+present}" ]; then
+            if [ -z "${fork_heads[$target_branch]+present}" ]; then
               create_branches+=("$branch")
-              report "Plan: create branch $branch -> $source_sha"
+              report "Plan: create branch $target_branch (source $branch) -> $source_sha"
               continue
             fi
 
-            target_sha=${fork_heads[$branch]}
+            target_sha=${fork_heads[$target_branch]}
             [ "$target_sha" = "$source_sha" ] && continue
-            if [ "$SYNC_MODE" = "standalone-private" ]; then
-              verify_ancestry "$branch" "$target_sha" "$source_sha"
-            else
+            if [ "$SYNC_MODE" = "public-fork" ]; then
               relation=$(gh api "repos/$GITHUB_REPOSITORY/compare/$target_sha...$source_sha" --jq '.status')
               if [ "$relation" != "ahead" ]; then
                 report "::error::Branch $branch is not a safe fast-forward ($relation); zero writes."
                 exit 1
               fi
             fi
+            verify_ancestry "$branch" "$target_branch" "$target_sha" "$source_sha"
 
             if [ "$branch" = "$PRIMARY_BRANCH" ]; then
               current_count=$(count_files "$GITHUB_REPOSITORY" "$target_sha")
@@ -331,7 +377,7 @@ jobs:
             fi
 
             update_branches+=("$branch")
-            report "Plan: fast-forward branch $branch, $target_sha -> $source_sha"
+            report "Plan: fast-forward branch $target_branch (source $branch), $target_sha -> $source_sha"
           done
 
           for tag in "${!upstream_tags[@]}"; do
@@ -350,7 +396,7 @@ jobs:
           done
 
           for branch in "${!fork_heads[@]}"; do
-            if [ "$branch" != "$CONTROL_BRANCH" ] && [ -z "${upstream_heads[$branch]+present}" ]; then
+            if [ "$branch" != "$CONTROL_BRANCH" ] && [ -z "${destinations[$branch]+present}" ]; then
               report "Preserved Fork-only branch: $branch -> ${fork_heads[$branch]}"
             fi
           done
@@ -383,15 +429,24 @@ jobs:
           # Recheck every planned target before the first write. Ordinary pushes
           # remain the final race-safe guard if a ref changes after this snapshot.
           for branch in "${update_branches[@]}"; do
-            expected_before=${fork_heads[$branch]}
-            latest=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq '.object.sha')
+            target_branch=${branch_map[$branch]-$branch}
+            expected_before=${fork_heads[$target_branch]}
+            latest=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$target_branch" --jq '.object.sha')
             if [ "$latest" != "$expected_before" ]; then
-              report "::error::Target branch $branch changed during planning."
+              report "::error::Target branch $target_branch changed during planning."
               exit 1
             fi
           done
           for branch in "${create_branches[@]}"; do
-            require_ref_absent "heads/$branch"
+            require_ref_absent "heads/${branch_map[$branch]-$branch}"
+          done
+          for branch in "${!branch_map[@]}"; do
+            [ -n "${fork_heads[$branch]+present}" ] || continue
+            latest=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq '.object.sha')
+            if [ "$latest" != "${fork_heads[$branch]}" ]; then
+              report "::error::Archived branch $branch changed during planning."
+              exit 1
+            fi
           done
           for tag in "${create_tags[@]}"; do
             require_ref_absent "tags/$tag"
@@ -411,14 +466,16 @@ jobs:
 
           for branch in "${update_branches[@]}"; do
             source_sha=${upstream_heads[$branch]}
-            push_ref heads "$branch" "$source_sha"
-            report "Fast-forwarded branch: $branch -> $source_sha"
+            target_branch=${branch_map[$branch]-$branch}
+            push_ref heads "$branch" "$source_sha" "$target_branch"
+            report "Fast-forwarded branch: $target_branch (source $branch) -> $source_sha"
           done
 
           for branch in "${create_branches[@]}"; do
             source_sha=${upstream_heads[$branch]}
-            push_ref heads "$branch" "$source_sha"
-            report "Created branch: $branch -> $source_sha"
+            target_branch=${branch_map[$branch]-$branch}
+            push_ref heads "$branch" "$source_sha" "$target_branch"
+            report "Created branch: $target_branch (source $branch) -> $source_sha"
           done
 
           for tag in "${create_tags[@]}"; do
