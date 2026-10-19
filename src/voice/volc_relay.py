@@ -41,10 +41,10 @@ SILENCE_FRAME = b"\x00" * FRAME_BYTES
 
 # 火山主打音色（S2S 全双工保证效果的 4 个 2.0 音色 + 常用款）
 VOLC_VOICES = [
-    {"id": "zh_female_vv_uranus_bigtts", "name": "Vivi 2.0 · 活泼女声（默认）"},
-    {"id": "zh_female_xiaohe_uranus_bigtts", "name": "小何 2.0 · 亲切女声"},
-    {"id": "zh_male_m191_uranus_bigtts", "name": "云舟 2.0 · 沉稳男声"},
-    {"id": "zh_male_taocheng_uranus_bigtts", "name": "小天 2.0 · 阳光男声"},
+    {"id": "zh_female_vv_uranus_bigtts", "name": "Vivi 2.0 · 女声（默认）"},
+    {"id": "zh_female_xiaohe_uranus_bigtts", "name": "小何 2.0 · 女声"},
+    {"id": "zh_male_m191_uranus_bigtts", "name": "云舟 2.0 · 男声"},
+    {"id": "zh_male_taocheng_uranus_bigtts", "name": "小天 2.0 · 男声"},
 ]
 
 

@@ -49,7 +49,10 @@ _MAX_TTS_RETRIES = 2
 _TTS_TIMEOUT_SEC = 20
 _STT_TIMEOUT_SEC = 30
 
-_tts_lock = threading.Lock()
+# edge-tts 并发合成上限：前端会按句预取（一句还没播完就开始合下一句），
+# 所以不能再串行化，否则预取等于没有；但也不能无上限，避免同时打爆端点。
+_MAX_TTS_CONCURRENCY = 3
+_tts_gate = threading.BoundedSemaphore(_MAX_TTS_CONCURRENCY)
 
 
 class VoiceProviderError(RuntimeError):
@@ -120,10 +123,10 @@ def synthesize(text: str, voice: str = "", rate: str = "+0%") -> tuple[bytes, st
 def _edge_synthesize_safe(text: str, voice: str, rate: str) -> tuple[bytes, str]:
     voice = voice or DEFAULT_EDGE_VOICE
     last_err = None
-    # edge-tts 偶发连接重置；串行重试（加锁避免同进程多请求一起打爆端点）
+    # edge-tts 偶发连接重置；逐次重试。并发数由 _tts_gate 限制（不是串行）。
     for attempt in range(1, _MAX_TTS_RETRIES + 2):
         try:
-            with _tts_lock:
+            with _tts_gate:
                 audio = _run_async(
                     asyncio.wait_for(
                         _edge_synthesize(text, voice, rate or "+0%"),

@@ -4,47 +4,47 @@ import {
   Lightning, CircleNotch, CheckCircle, Warning, CaretDown,
   PhoneOutgoing, Stack,
 } from '@phosphor-icons/react'
-import { API_BASE, Field, Toggle, Input, Select } from './SharedComponents'
+import { API_BASE, Field, Toggle, Input, Select, ComboInput } from './SharedComponents'
 
-// ── B 档模型（均已在千问平台实测可连）──────────────────────────────
+// ── B 档模型：常用预设（均已在千问平台实测可连）；字段本身允许手填 ──
 const MODELS = [
-  { value: 'qwen3.8-omni-flash-realtime', desc: '3.8 Omni · 最新全模态，便宜（推荐）' },
-  { value: 'qwen3.5-omni-flash-realtime', desc: '3.5 Omni Flash · 全模态' },
-  { value: 'qwen3.5-omni-plus-realtime', desc: '3.5 Omni Plus · 全模态增强' },
-  { value: 'qwen-audio-3.1-realtime-plus', desc: '3.1 Audio Plus · 旗舰语音对话' },
-  { value: 'qwen-audio-3.0-realtime-plus', desc: '3.0 Audio Plus' },
-  { value: 'qwen-audio-3.0-realtime-flash', desc: '3.0 Audio Flash · 最省' },
+  { value: 'qwen3.8-omni-flash-realtime', desc: 'Qwen3.8 Omni Flash（默认）' },
+  { value: 'qwen3.5-omni-flash-realtime', desc: 'Qwen3.5 Omni Flash' },
+  { value: 'qwen3.5-omni-plus-realtime', desc: 'Qwen3.5 Omni Plus' },
+  { value: 'qwen-audio-3.1-realtime-plus', desc: 'Qwen Audio 3.1 Plus' },
+  { value: 'qwen-audio-3.0-realtime-plus', desc: 'Qwen Audio 3.0 Plus' },
+  { value: 'qwen-audio-3.0-realtime-flash', desc: 'Qwen Audio 3.0 Flash' },
 ]
 // Omni 家族音色（session.audio.output.voice）
 const OMNI_VOICES = [
-  { value: 'Tina', desc: '甜甜 Tina · 温暖女声（默认）' },
-  { value: 'Cici', desc: '绵绵 Cici · 软萌女声' },
-  { value: 'Mia', desc: '舒然 Mia · 温柔女声' },
-  { value: 'Serena', desc: '苏瑶 Serena · 知性女声' },
-  { value: 'Maia', desc: '四月 Maia · 清透女声' },
-  { value: 'Evan', desc: '江晨 Evan · 清爽男声' },
-  { value: 'Zane', desc: '泽恩 Zane · 磁性男声' },
-  { value: 'Raymond', desc: '林川野 Raymond · 沉稳男声' },
-  { value: 'Aiden', desc: '艾登 Aiden · 年轻男声' },
-  { value: 'Theo Calm', desc: '予安 Theo Calm · 治愈男声' },
+  { value: 'Tina', desc: '女声（默认）' },
+  { value: 'Cici', desc: '女声' },
+  { value: 'Mia', desc: '女声' },
+  { value: 'Serena', desc: '女声' },
+  { value: 'Maia', desc: '女声' },
+  { value: 'Evan', desc: '男声' },
+  { value: 'Zane', desc: '男声' },
+  { value: 'Raymond', desc: '男声' },
+  { value: 'Aiden', desc: '男声' },
+  { value: 'Theo Calm', desc: '男声' },
 ]
 // Qwen-Audio 家族音色（顶层 voice）
 const AUDIO_VOICES = [
-  { value: 'longanqian_v3.1', desc: '龙眼钱 · 默认女声' },
-  { value: 'long_v3.1', desc: '小龙 · 男声' },
-  { value: 'longcheng_v3.1', desc: '龙城 · 男声' },
-  { value: 'longshu_v3.1', desc: '龙舒 · 女声' },
-  { value: 'longjing_v3.1', desc: '龙婧 · 女声' },
-  { value: 'longmiao_v3.1', desc: '龙妙 · 女声' },
+  { value: 'longanqian_v3.1', desc: '女声（默认）' },
+  { value: 'long_v3.1', desc: '男声' },
+  { value: 'longcheng_v3.1', desc: '男声' },
+  { value: 'longshu_v3.1', desc: '女声' },
+  { value: 'longjing_v3.1', desc: '女声' },
+  { value: 'longmiao_v3.1', desc: '女声' },
 ]
 const TURNS = [
-  { value: 'smart_turn', desc: '智能语义断句（推荐，嗯/啊不打断）' },
+  { value: 'smart_turn', desc: '语义断句' },
   { value: 'server_vad', desc: '声学停顿断句' },
 ]
 const QWEN_TTS_VOICES = [
-  { value: 'Cherry', desc: 'Cherry · 默认女声' },
-  { value: 'Serena', desc: 'Serena' },
-  { value: 'Ethan', desc: 'Ethan · 男声' },
+  { value: 'Cherry', desc: '女声（默认）' },
+  { value: 'Serena', desc: '女声' },
+  { value: 'Ethan', desc: '男声' },
 ]
 
 const CARD = 'rounded-2xl border border-border-main bg-bg-card p-5 shadow-sm'
@@ -96,6 +96,8 @@ export default function VoiceSection() {
   const [saved, setSaved] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState(null)
+  // 是否有改动尚未保存（驱动吸底操作条上的提示）
+  const [dirty, setDirty] = useState(false)
   const [openB, setOpenB] = useState(true)
   const [openA, setOpenA] = useState(true)
   // 折叠展开动画进行中才裁剪（overflow-hidden），结束后放开，避免内部 Select 下拉被裁掉
@@ -136,8 +138,12 @@ export default function VoiceSection() {
   const [ttsHasKey, setTtsHasKey] = useState(false)
   const [ttsModel, setTtsModel] = useState('tts-1')
   const [ttsVoice, setTtsVoice] = useState('zh-CN-XiaoxiaoNeural')
+  const [qwenTtsModel, setQwenTtsModel] = useState('qwen3-tts-flash-realtime')
   const [qwenTtsVoice, setQwenTtsVoice] = useState('Cherry')
   const [ttsRate, setTtsRate] = useState('+0%')
+
+  // 包装 setter：用户任何改动都标记为"未保存"，并清掉上一次的"已保存"提示
+  const bind = (setter) => (v) => { setter(v); setDirty(true); setSaved(false) }
 
   useEffect(() => {
     fetch(`${API_BASE}/api/voice/realtime/config`)
@@ -166,6 +172,7 @@ export default function VoiceSection() {
         setTtsBaseUrl(d.tts_base_url || ''); setTtsHasKey(!!d.tts_has_key)
         setTtsModel(d.tts_model || 'tts-1')
         setTtsVoice(d.tts_voice || 'zh-CN-XiaoxiaoNeural')
+        setQwenTtsModel(d.tts_qwen_model || 'qwen3-tts-flash-realtime')
         setQwenTtsVoice(d.tts_qwen_voice || 'Cherry')
         setTtsRate(d.tts_rate || '+0%')
         // 任一厂商已启用就默认展开 B 档
@@ -179,6 +186,8 @@ export default function VoiceSection() {
   // 切换模型家族时，音色若不属于该家族则自动切到家族默认
   const onModelChange = (m) => {
     setModel(m)
+    setDirty(true)
+    setSaved(false)
     const list = m.includes('omni') ? OMNI_VOICES : AUDIO_VOICES
     if (!list.some((v) => v.value === voice)) {
       setVoice(list[0].value)
@@ -188,6 +197,8 @@ export default function VoiceSection() {
   // 切换实时服务商：只改本地选择，保存后才真正生效（徽标会明示）
   const selectRtProvider = (p) => {
     setRtProvider(p)
+    setDirty(true)
+    setSaved(false)
     setTestResult(null)
   }
 
@@ -211,6 +222,7 @@ export default function VoiceSection() {
       tts_provider: ttsProvider, tts_base_url: ttsBaseUrl,
       tts_api_key: ttsApiKey || '********', tts_model: ttsModel,
       tts_voice: ttsVoice, tts_qwen_voice: qwenTtsVoice,
+      tts_qwen_model: qwenTtsModel,
       // edge-tts 语速（仅 A 档 Edge 生效）
       tts_rate: ttsRate,
     }
@@ -226,6 +238,7 @@ export default function VoiceSection() {
       const d = await r.json()
       if (d.ok) {
         setSaved(true)
+        setDirty(false)
         setApiKey(''); setVolcApiKey(''); setSttApiKey(''); setTtsApiKey('')
         setHasKey(true); setVolcHasKey(true)
         setSttHasKey(sttProvider === 'openai' && !!sttBaseUrl)
@@ -301,7 +314,7 @@ export default function VoiceSection() {
               关闭后右下角麦克风入口隐藏；不影响微信/QQ 文字 Agent
             </div>
           </div>
-          <Toggle enabled={voiceEnabled} onChange={setVoiceEnabled} />
+          <Toggle enabled={voiceEnabled} onChange={bind(setVoiceEnabled)} />
         </div>
         <div className="mt-3 flex items-start gap-2 rounded-xl bg-emerald-500/8 px-3.5 py-2.5 text-[12px] leading-5 text-text-secondary">
           <Stack size={15} className="mt-0.5 shrink-0 text-emerald-500" />
@@ -317,7 +330,7 @@ export default function VoiceSection() {
         <CollapseHeader
           icon={<Lightning size={20} weight="fill" />}
           title="B 档 · 实时全双工"
-          subtitle="端到端语音模型，边听边说、可随时打断，豆包通话同款体感"
+          subtitle="端到端语音模型，边听边说、可随时打断"
           open={openB} onToggle={() => setOpenB((v) => !v)}
           badge={storedReady
             ? <span className="rounded-full bg-emerald-400/15 px-2 py-0.5 text-[10px] font-medium text-emerald-500 ring-1 ring-emerald-400/30">
@@ -353,7 +366,7 @@ export default function VoiceSection() {
                   <div className="flex items-start gap-2 rounded-xl bg-amber-500/10 px-3.5 py-2.5 text-[12px] leading-5 text-amber-600 dark:text-amber-400">
                     <Warning size={15} weight="bold" className="mt-0.5 shrink-0" />
                     <span>
-                      切换待保存：点下方「保存全部配置」后，通话将使用
+                      切换待保存：点「保存全部配置」后，通话将使用
                       <b>「{PROVIDER_LABEL[rtProvider]}」</b>；当前实际生效仍是
                       <b>「{PROVIDER_LABEL[storedProvider]}」</b>。
                     </span>
@@ -386,26 +399,26 @@ export default function VoiceSection() {
                       </div>
                       <div className="flex items-center gap-3">
                         <span className={`text-[12px] font-medium ${qwenState.cls}`}>{qwenState.text}</span>
-                        <Toggle enabled={qwenEnabled} onChange={setQwenEnabled} />
+                        <Toggle enabled={qwenEnabled} onChange={bind(setQwenEnabled)} />
                       </div>
                     </div>
 
                     <Field label="API Key"
                       hint={hasKey && !apiKey ? `已配置（${keyHint}），留空不修改` : 'platform.qianwenai.com 创建'}>
-                      <Input type="password" value={apiKey} onChange={setApiKey}
+                      <Input type="password" value={apiKey} onChange={bind(setApiKey)}
                         placeholder={hasKey ? '••••••••（已保存，留空不修改）' : '粘贴 sk- 开头的 Key'} />
                     </Field>
 
                     <Field label="实时模型">
-                      <Select variant="stack" value={model} onChange={onModelChange} options={MODELS} />
+                      <ComboInput value={model} onChange={onModelChange} options={MODELS} />
                     </Field>
 
                     <Field label="发音音色">
-                      <Select variant="stack" value={voice} onChange={setVoice} options={voiceList} />
+                      <ComboInput value={voice} onChange={bind(setVoice)} options={voiceList} />
                     </Field>
 
                     <Field label="轮次判断方式">
-                      <Select variant="stack" value={turnMode} onChange={setTurnMode} options={TURNS} />
+                      <Select variant="stack" value={turnMode} onChange={bind(setTurnMode)} options={TURNS} />
                     </Field>
                   </>
                 ) : (
@@ -415,12 +428,12 @@ export default function VoiceSection() {
                       <div>
                         <div className="text-[13.5px] font-medium text-text-main">启用火山豆包全双工</div>
                         <div className="text-[12px] text-text-muted">
-                          Seeduplex 3.0，按音频时长计费，主打抗干扰/车载；两家开关互不影响
+                          Seeduplex 3.0，按音频时长计费；两家开关互不影响
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
                         <span className={`text-[12px] font-medium ${volcState.cls}`}>{volcState.text}</span>
-                        <Toggle enabled={volcEnabled} onChange={setVolcEnabled} />
+                        <Toggle enabled={volcEnabled} onChange={bind(setVolcEnabled)} />
                       </div>
                     </div>
 
@@ -428,23 +441,22 @@ export default function VoiceSection() {
                       hint={volcHasKey && !volcApiKey
                         ? `已配置（${volcKeyHint}），留空不修改`
                         : '火山控制台 → 豆包语音 → API Key 管理'}>
-                      <Input type="password" value={volcApiKey} onChange={setVolcApiKey}
+                      <Input type="password" value={volcApiKey} onChange={bind(setVolcApiKey)}
                         placeholder={volcHasKey ? '••••••••（已保存，留空不修改）' : '粘贴火山 X-Api-Key'} />
                     </Field>
 
-                    <Field label="发音音色（Seeduplex 主打 2.0 音色）">
-                      <Select variant="stack" value={volcVoice} onChange={setVolcVoice}
+                    <Field label="发音音色">
+                      <ComboInput value={volcVoice} onChange={bind(setVolcVoice)}
                         options={volcVoices.length ? volcVoices : [
-                          { value: 'zh_female_vv_uranus_bigtts', desc: 'Vivi 2.0 · 活泼女声（默认）' },
-                          { value: 'zh_female_xiaohe_uranus_bigtts', desc: '小何 2.0 · 亲切女声' },
-                          { value: 'zh_male_m191_uranus_bigtts', desc: '云舟 2.0 · 沉稳男声' },
-                          { value: 'zh_male_taocheng_uranus_bigtts', desc: '小天 2.0 · 阳光男声' },
+                          { value: 'zh_female_vv_uranus_bigtts', desc: 'Vivi 2.0 · 女声（默认）' },
+                          { value: 'zh_female_xiaohe_uranus_bigtts', desc: '小何 2.0 · 女声' },
+                          { value: 'zh_male_m191_uranus_bigtts', desc: '云舟 2.0 · 男声' },
+                          { value: 'zh_male_taocheng_uranus_bigtts', desc: '小天 2.0 · 男声' },
                         ]} />
                     </Field>
 
                     <div className="rounded-xl bg-bg-raised px-3.5 py-2.5 text-[12px] leading-5 text-text-muted">
-                      模型固定 1.2.6.1 全双工版，轮次由服务端自适应端点检测自动处理，
-                      擅长在导航声、乘客说话和路噪中锁定你的声音。
+                      模型固定 1.2.6.1 全双工版，轮次由服务端自适应端点检测自动处理。
                     </div>
                   </>
                 )}
@@ -481,7 +493,7 @@ export default function VoiceSection() {
                       : '测试连接'}
                   </button>
                   {testResult?.ok && !testing && (
-                    <span className="text-[12px] text-emerald-500">验证通过，记得点下方「保存全部配置」</span>
+                    <span className="text-[12px] text-emerald-500">验证通过，记得保存</span>
                   )}
                 </div>
               </div>
@@ -495,7 +507,7 @@ export default function VoiceSection() {
         <CollapseHeader
           icon={<PhoneOutgoing size={19} weight="fill" />}
           title="A 档 · 标准模式（识别 + 你的 LLM + 合成）"
-          subtitle="免费通道可用零成本；B 档不可用时自动走这里，也可单独使用省钱"
+          subtitle="浏览器识别 + Edge 合成是免费通道；B 档不可用时自动走这里，也可单独使用"
           open={openA} onToggle={() => setOpenA((v) => !v)}
           badge={standardEnabled
             ? <span className="rounded-full bg-emerald-400/15 px-2 py-0.5 text-[10px] font-medium text-emerald-500 ring-1 ring-emerald-400/30">已启用</span>
@@ -512,32 +524,32 @@ export default function VoiceSection() {
                 <div className="flex items-center justify-between rounded-xl bg-bg-raised px-4 py-3">
                   <div>
                     <div className="text-[13.5px] font-medium text-text-main">启用标准模式</div>
-                    <div className="text-[12px] text-text-muted">作为 B 档降级 / 省钱通道</div>
+                    <div className="text-[12px] text-text-muted">作为 B 档降级通道</div>
                   </div>
-                  <Toggle enabled={standardEnabled} onChange={setStandardEnabled} />
+                  <Toggle enabled={standardEnabled} onChange={bind(setStandardEnabled)} />
                 </div>
 
                 {/* STT */}
                 <div className="space-y-3">
                   <div className="text-[13px] font-semibold text-text-main">耳朵 · 语音识别 STT</div>
-                  <Segmented value={sttProvider} onChange={setSttProvider}
+                  <Segmented value={sttProvider} onChange={bind(setSttProvider)}
                     options={[
-                      { value: 'browser', label: '浏览器识别（免费，推荐 Edge）' },
-                      { value: 'openai', label: '云端识别（更准）' },
+                      { value: 'browser', label: '浏览器识别（免费）' },
+                      { value: 'openai', label: '云端识别' },
                     ]} />
                   {sttProvider === 'openai' && (
                     <div className="space-y-3 rounded-xl bg-bg-raised p-3.5">
                       <Field label="接口地址（OpenAI 兼容 /v1）">
-                        <Input value={sttBaseUrl} onChange={setSttBaseUrl}
+                        <Input value={sttBaseUrl} onChange={bind(setSttBaseUrl)}
                           placeholder="https://api.siliconflow.cn/v1" />
                       </Field>
                       <Field label="API Key"
                         hint={sttHasKey && !sttApiKey ? '已配置，留空不修改' : ''}>
-                        <Input type="password" value={sttApiKey} onChange={setSttApiKey}
+                        <Input type="password" value={sttApiKey} onChange={bind(setSttApiKey)}
                           placeholder={sttHasKey ? '••••••••（已保存）' : '云端识别 Key'} />
                       </Field>
                       <Field label="识别模型">
-                        <Input value={sttModel} onChange={setSttModel} placeholder="FunAudioLLM/SenseVoiceSmall" />
+                        <Input value={sttModel} onChange={bind(setSttModel)} placeholder="FunAudioLLM/SenseVoiceSmall" />
                       </Field>
                     </div>
                   )}
@@ -546,16 +558,16 @@ export default function VoiceSection() {
                 {/* TTS */}
                 <div className="space-y-3">
                   <div className="text-[13px] font-semibold text-text-main">嘴 · 语音合成 TTS</div>
-                  <Segmented value={ttsProvider} onChange={setTtsProvider}
+                  <Segmented value={ttsProvider} onChange={bind(setTtsProvider)}
                     options={[
                       { value: 'edge', label: 'Edge 免费' },
-                      { value: 'qwen', label: '千问流式 ¥1/万字' },
+                      { value: 'qwen', label: '千问流式' },
                       { value: 'openai', label: 'OpenAI 兼容' },
                     ]} />
                   {ttsProvider === 'edge' && (
                     <>
                       <Field label="Edge 音色">
-                        <Select variant="stack" value={ttsVoice} onChange={setTtsVoice} options={[
+                        <ComboInput value={ttsVoice} onChange={bind(setTtsVoice)} options={[
                           { value: 'zh-CN-XiaoxiaoNeural', desc: '晓晓 · 女声（默认）' },
                           { value: 'zh-CN-YunxiNeural', desc: '云希 · 男声' },
                           { value: 'zh-CN-XiaoyiNeural', desc: '晓伊 · 女声' },
@@ -565,7 +577,7 @@ export default function VoiceSection() {
                         ]} />
                       </Field>
                       <Field label="语速（仅 Edge 生效）">
-                        <Select variant="stack" value={ttsRate} onChange={setTtsRate} options={[
+                        <Select variant="stack" value={ttsRate} onChange={bind(setTtsRate)} options={[
                           { value: '-20%', desc: '慢 · -20%' },
                           { value: '-10%', desc: '略慢 · -10%' },
                           { value: '+0%', desc: '默认 · 不变速' },
@@ -578,10 +590,14 @@ export default function VoiceSection() {
                   {ttsProvider === 'qwen' && (
                     <div className="space-y-3 rounded-xl bg-bg-raised p-3.5">
                       <p className="text-[12px] text-text-muted">
-                        复用上方 B 档的千问 Key；模型 qwen3-tts-flash-realtime，¥1/万字符。
+                        复用上方 B 档的千问 Key。
                       </p>
+                      <Field label="合成模型">
+                        <Input value={qwenTtsModel} onChange={bind(setQwenTtsModel)}
+                          placeholder="qwen3-tts-flash-realtime" />
+                      </Field>
                       <Field label="音色">
-                        <Select variant="stack" value={qwenTtsVoice} onChange={setQwenTtsVoice}
+                        <ComboInput value={qwenTtsVoice} onChange={bind(setQwenTtsVoice)}
                           options={QWEN_TTS_VOICES} />
                       </Field>
                     </div>
@@ -589,16 +605,16 @@ export default function VoiceSection() {
                   {ttsProvider === 'openai' && (
                     <div className="space-y-3 rounded-xl bg-bg-raised p-3.5">
                       <Field label="接口地址（OpenAI 兼容 /v1）">
-                        <Input value={ttsBaseUrl} onChange={setTtsBaseUrl}
+                        <Input value={ttsBaseUrl} onChange={bind(setTtsBaseUrl)}
                           placeholder="https://api.example.com/v1" />
                       </Field>
                       <Field label="API Key"
                         hint={ttsHasKey && !ttsApiKey ? '已配置，留空不修改' : ''}>
-                        <Input type="password" value={ttsApiKey} onChange={setTtsApiKey}
+                        <Input type="password" value={ttsApiKey} onChange={bind(setTtsApiKey)}
                           placeholder={ttsHasKey ? '••••••••（已保存）' : '云端合成 Key'} />
                       </Field>
                       <Field label="合成模型">
-                        <Input value={ttsModel} onChange={setTtsModel} placeholder="tts-1" />
+                        <Input value={ttsModel} onChange={bind(setTtsModel)} placeholder="tts-1" />
                       </Field>
                     </div>
                   )}
@@ -609,24 +625,31 @@ export default function VoiceSection() {
         </AnimatePresence>
       </div>
 
-      {/* 保存（测试连接结果在 B 档卡片内就地显示） */}
-      <div className="flex flex-wrap items-center gap-3">
-        <motion.button whileTap={{ scale: 0.97 }} onClick={save} disabled={saving}
-          className="flex items-center gap-2 rounded-full bg-brand-green-hover px-6 py-2.5 text-[13.5px] font-semibold text-white transition hover:bg-[#0d8c5c] disabled:opacity-60">
-          {saving ? <><CircleNotch size={16} className="animate-spin" /> 保存中…</> : '保存全部配置'}
-        </motion.button>
-        {saved && !testResult && (
-          <span className="flex items-center gap-1.5 text-[12.5px] text-emerald-500">
-            <CheckCircle size={15} weight="fill" /> 已保存并即时生效
-          </span>
-        )}
-      </div>
-
       <div className="rounded-2xl border border-border-main bg-bg-card/60 p-4">
         <p className="text-[12px] leading-6 text-text-muted">
           两条通道与微信/QQ 文字 Agent 相互独立：实时模型与标准模式都只以只读方式借用查询工具
           （查推送、查摘要、联网搜索等），不触发添加预警、新建定时任务等写操作，不影响原有文字对话和记忆。
         </p>
+      </div>
+
+      {/* 保存：吸底常驻，滚动时不消失；有未保存改动时给出提示 */}
+      <div className="sticky bottom-4 z-30">
+        <div className="flex flex-wrap items-center gap-3 rounded-full border border-border-main bg-bg-card/95 px-4 py-2 shadow-lg backdrop-blur-md">
+          <motion.button whileTap={{ scale: 0.97 }} onClick={save} disabled={saving}
+            className="flex items-center gap-2 rounded-full bg-brand-green-hover px-6 py-2.5 text-[13.5px] font-semibold text-white transition hover:bg-[#0d8c5c] disabled:opacity-60">
+            {saving ? <><CircleNotch size={16} className="animate-spin" /> 保存中…</> : '保存全部配置'}
+          </motion.button>
+          {dirty && !saving && !saved && (
+            <span className="flex items-center gap-1.5 text-[12.5px] text-amber-500">
+              <Warning size={15} weight="fill" /> 有未保存的改动
+            </span>
+          )}
+          {saved && !testResult && (
+            <span className="flex items-center gap-1.5 text-[12.5px] text-emerald-500">
+              <CheckCircle size={15} weight="fill" /> 已保存并即时生效
+            </span>
+          )}
+        </div>
       </div>
     </div>
   )

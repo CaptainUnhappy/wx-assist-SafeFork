@@ -2003,7 +2003,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 from src.config import load_config
                 # A 档 edge-tts 语速（仅 edge 通道生效，其它通道内部忽略该参数）
                 rate = getattr(load_config(), "voice_tts_rate", "+0%") or "+0%"
+                tts_t0 = time.monotonic()
                 audio, audio_type = synthesize(text[:1000], voice=voice, rate=rate)
+                logger.info("[VOICE-A] tts ok in %.0fms bytes=%d text=%s",
+                            (time.monotonic() - tts_t0) * 1000, len(audio), text[:40])
                 self.send_response(200)
                 self.send_header("Content-Type", audio_type)
                 self.send_header("Content-Length", str(len(audio)))

@@ -188,6 +188,94 @@ export function Input({ type = 'text', value, onChange, placeholder }) {
   )
 }
 
+/**
+ * 可输入下拉：既能从建议列表里点选，也允许直接手填任意值。
+ * 用于模型 ID / 音色这类"给几个常用项、但不该锁死"的字段。
+ */
+export function ComboInput({ value, onChange, options = [], placeholder }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    function handleClick(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  // 已输入内容时按子串过滤建议，避免一次铺一长条列表
+  const kw = (value || '').trim().toLowerCase()
+  const suggestions = kw
+    ? options.filter((o) => String(o.value || '').toLowerCase().includes(kw))
+    : options
+
+  return (
+    <div ref={ref} className="relative w-full">
+      <div className="relative w-full flex items-center">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={() => setOpen(true)}
+          placeholder={placeholder}
+          className="w-full bg-bg-raised border border-border-main rounded-full pl-5 pr-12 py-2.5 text-[14px] text-text-main
+                     placeholder:text-text-muted font-mono
+                     focus:outline-none focus:border-brand-green focus:ring-2 focus:ring-brand-green/15
+                     transition-all duration-200
+                     hover:border-text-muted/30 dark:hover:border-text-muted/40"
+        />
+        {options.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-label="展开建议列表"
+            className="absolute inset-y-0 right-4 flex items-center px-1 text-text-muted text-lg font-mono cursor-pointer"
+          >
+            <span
+              className="block transition-transform duration-200"
+              style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
+            >&#8250;</span>
+          </button>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {open && suggestions.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            className="absolute z-50 left-0 right-0 mt-1.5 bg-bg-card border border-border-main rounded-2xl shadow-xl overflow-hidden max-h-[280px] overflow-y-auto"
+          >
+            {suggestions.map((opt) => {
+              const active = opt.value === value
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => { onChange(opt.value); setOpen(false) }}
+                  className={`w-full text-left px-4 py-2.5 cursor-pointer transition-colors block
+                    ${active ? 'bg-brand-green-light' : 'hover:bg-bg-raised'}`}
+                >
+                  <div className={`text-[13px] font-mono leading-5 ${active
+                    ? 'text-brand-green-hover dark:text-brand-green font-semibold'
+                    : 'text-text-main'}`}>
+                    {opt.value}
+                  </div>
+                  {opt.desc && (
+                    <div className={`mt-0.5 text-[11px] ${active ? 'text-brand-green/70' : 'text-text-muted'}`}>
+                      {opt.desc}
+                    </div>
+                  )}
+                </button>
+              )
+            })}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 // ── SectionHeader ─────────────────────────────────────────────────
 // Unified section header used across AssistantPanel, FavoritesTab, etc.
 export function SectionHeader({ title, accent = 'var(--brand-green)', icon: Icon, subtitle, action }) {

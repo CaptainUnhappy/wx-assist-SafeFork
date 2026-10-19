@@ -1,4 +1,4 @@
-﻿﻿﻿﻿import { useState, useRef, useEffect } from 'react'
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle, Warning, FloppyDisk, Info, CircleNotch, MagnifyingGlass, Lightning, PaperPlaneTilt, QrCode, SignOut, TestTube, ChatCircle, Trash, CaretDown, CaretRight, X, Brain, ArrowsClockwise, DownloadSimple, Rocket, ArrowSquareOut } from '@phosphor-icons/react'
 import { QRCodeSVG } from 'qrcode.react'

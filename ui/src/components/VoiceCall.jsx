@@ -97,23 +97,6 @@ function stripForSpeech(s) {
     .trim()
 }
 
-// 回声相似度（bigram Jaccard + 包含判断），用于扬声器外放时过滤"听到自己"
-function echoSimilar(text, refText) {
-  const a = (text || '').replace(/\s/g, '')
-  const b = (refText || '').replace(/\s/g, '')
-  if (a.length < 3 || !b) return 0
-  if (b.includes(a) || a.includes(b)) return 1
-  const grams = (s) => {
-    const set = new Set()
-    for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2))
-    return set
-  }
-  const ga = grams(a); const gb = grams(b)
-  let inter = 0
-  ga.forEach((g) => { if (gb.has(g)) inter++ })
-  return inter / Math.max(1, Math.min(ga.size, gb.size))
-}
-
 // ── WAV 编码（16bit PCM mono，云端 STT 上传用）──────────────────────
 function encodeWav(samples, sampleRate) {
   const buffer = new ArrayBuffer(44 + samples.length * 2)
@@ -144,6 +127,7 @@ class CloudVadEngine {
     this.onError = () => {}
     this.speakingGate = () => false
     this._spoke = false
+    this._paused = false
   }
 
   async start() {
@@ -175,6 +159,7 @@ class CloudVadEngine {
   }
 
   _onFrame(data) {
+    if (this._paused) return   // 半双工：AI 出声期间不收帧，杜绝外放回声
     let sum = 0
     for (let i = 0; i < data.length; i += 2) sum += data[i] * data[i]
     const rms = Math.sqrt(sum / (data.length / 2))
@@ -243,6 +228,18 @@ class CloudVadEngine {
 
   resetTurn() { this._spoke = false }
 
+  /** 半双工：AI 说话时暂停收音（麦克风保持打开，只是不再处理帧） */
+  pause() {
+    this._paused = true
+    this._inSpeech = false
+    this._cur = []
+    this._preRoll = []
+    this._silenceFrames = 0
+    this._hot = 0
+  }
+
+  resume() { this._paused = false }
+
   stop() {
     try { this._proc && this._proc.disconnect() } catch {}
     try { this._stream && this._stream.getTracks().forEach((t) => t.stop()) } catch {}
@@ -261,6 +258,8 @@ class WebSpeechEngine {
     this.speakingGate = () => false
     this._spoke = false
     this._finalBuf = ''
+    this._paused = false
+    this._lastCommit = { text: '', at: 0 }
   }
 
   start() {
@@ -278,6 +277,7 @@ class WebSpeechEngine {
     this._rec = rec
 
     rec.onresult = (e) => {
+      if (this._paused || this._rec !== rec) return
       let interim = ''
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const t = e.results[i][0].transcript
@@ -293,6 +293,7 @@ class WebSpeechEngine {
       }
     }
     rec.onerror = (ev) => {
+      if (this._paused) return   // 暂停期间的 aborted 等属正常
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         this.onError('麦克风权限被拒绝，请在浏览器地址栏允许麦克风')
       } else if (ev.error === 'network') {
@@ -302,9 +303,10 @@ class WebSpeechEngine {
     }
     rec.onend = () => {
       // continuous 模式浏览器也可能自动结束，主动重启以保持持续聆听
-      if (this._active) {
-        setTimeout(() => { if (this._active) try { this._rec.start() } catch {} }, 120)
-      }
+      if (this._paused || !this._active || this._rec !== rec) return
+      setTimeout(() => {
+        if (this._active && !this._paused && this._rec === rec) try { rec.start() } catch {}
+      }, 120)
     }
     try { rec.start() } catch (e) { /* 重复 start 忽略 */ }
   }
@@ -314,10 +316,41 @@ class WebSpeechEngine {
     this._finalBuf = ''; this._spoke = false
     this.onPartial('')
     try { this._rec.stop() } catch {} // onend 会自动重启，resultIndex 归零
+    // 同一段音频会被 repeated 提交（continuous 模式的已知行为）→ 2.5 秒内同句只发一次
+    const norm = (text || '').replace(/\s/g, '')
+    const now = Date.now()
+    if (norm && norm === this._lastCommit.text && now - this._lastCommit.at < 2500) return
+    this._lastCommit = { text: norm, at: now }
     if (text) this.onUtterance(text)
   }
 
   resetTurn() { this._spoke = false }
+
+  /** 丢弃尚未提交的识别缓冲（AI 回合结束时调用，防止把自己的尾音当成用户输入） */
+  discardTurn() {
+    clearTimeout(this._commitTimer)
+    this._finalBuf = ''
+    this._spoke = false
+    this.onPartial('')
+  }
+
+  /** 半双工：AI 说话时彻底停止收音，重启时再开（浏览器识别拿不到自己的音频流做 AEC） */
+  pause() {
+    if (this._paused) return
+    this._paused = true
+    clearTimeout(this._commitTimer)
+    this._finalBuf = ''
+    this._spoke = false
+    this.onPartial('')
+    try { this._rec && this._rec.abort() } catch {}
+  }
+
+  resume() {
+    if (!this._paused) return
+    this._paused = false
+    if (!this._active) return
+    this._startRecognition()
+  }
 
   stop() {
     this._active = false
@@ -346,7 +379,36 @@ export default function VoiceCall({ open, onClose }) {
   const channelRef = useRef(null)
 
   const phaseRef = useRef('idle')
-  const setPhaseBoth = useCallback((p) => { phaseRef.current = p; setPhase(p) }, [])
+  const spokenRef = useRef('')      // 本轮实际念出去的文案（回声比对基准）
+  const speakEndAtRef = useRef(0)   // 离开 speaking 的时刻（残留回声时间窗）
+  const lastUtterRef = useRef({ text: '', at: 0 })  // 最近一次接受的用户话（识别器重复提交去重）
+  const resumeTimerRef = useRef(null)
+  const setPhaseBoth = useCallback((p) => {
+    const prev = phaseRef.current
+    // 只有真正离开「AI 回合」（speaking/thinking 之间互切不算）才算回合结束
+    if ((prev === 'speaking' || prev === 'thinking') && p !== 'speaking' && p !== 'thinking') {
+      speakEndAtRef.current = Date.now()
+      // 丢弃识别器里尚未提交的缓冲（含 750ms 待触发的回声提交），防止把自己的尾音当成用户的话
+      try {
+        const eng = engineRef.current
+        if (eng && typeof eng.discardTurn === 'function') eng.discardTurn()
+      } catch {}
+    }
+    phaseRef.current = p; setPhase(p)
+    // 半双工：整个 AI 回合（thinking + speaking）都暂停收音，只在回到 listening 时恢复。
+    // 恢复延迟 500ms，避免句间缝隙来回重启识别器。
+    clearTimeout(resumeTimerRef.current)
+    const eng = engineRef.current
+    if (!eng || typeof eng.pause !== 'function') return
+    try {
+      if (p === 'thinking' || p === 'speaking') eng.pause()
+      else {
+        resumeTimerRef.current = setTimeout(() => {
+          if (phaseRef.current === 'listening') { try { eng.resume() } catch {} }
+        }, 500)
+      }
+    } catch {}
+  }, [])
   const messagesRef = useRef([])
   const listRef = useRef(null)
   const engineRef = useRef(null)
@@ -437,7 +499,7 @@ export default function VoiceCall({ open, onClose }) {
     const s = ttsRef.current
     s.gen += 1
     s.queue = []
-    s.prefetch = null
+    spokenRef.current = ''   // 新一轮开始，回声比对基准清空
     if (s.audio) { try { s.audio.pause() } catch {} }
     if (s.abort) { try { s.abort.abort() } catch {} }
     s.abort = new AbortController()
@@ -481,24 +543,29 @@ export default function VoiceCall({ open, onClose }) {
   const pumpTts = useCallback(async (gen) => {
     const s = ttsRef.current
     while (s.gen === gen) {
-      const sentence = s.queue.shift()
-      if (!sentence) {
+      const item = s.queue.shift()
+      if (!item) {
         s.busy = false
-        if (phaseRef.current !== 'idle') setPhaseBoth('listening')
+        // 队列暂时空了但助手还在出字：继续留在 AI 回合内（thinking），
+        // 不要提前切 listening —— 否则回声过滤会在句间缝隙里失效
+        const stillStreaming = messagesRef.current.some((m) => m.streaming)
+        if (phaseRef.current !== 'idle') setPhaseBoth(stillStreaming ? 'thinking' : 'listening')
         return
       }
-      // 预取：当前句开播前就把下一句的音频请求发出去，消除句间网络空隙
-      let blobPromise = (s.prefetch && s.prefetch.text === sentence)
-        ? s.prefetch.promise : null
-      s.prefetch = null
-      const peek = s.queue[0]
-      if (peek) s.prefetch = { text: peek, promise: fetchSpeech(peek, gen) }
-
+      // 合成请求在入队时就已发出（见 enqueueSpeech），这里直接等结果
+      // 记录即将念出去的文案，作为"听见自己"的回声比对基准
+      spokenRef.current = (spokenRef.current + item.text).slice(-800)
       setPhaseBoth('speaking')
       setToolHint('')
       try {
-        if (!blobPromise) blobPromise = fetchSpeech(sentence, gen)
-        const blob = await blobPromise
+        let blob
+        try {
+          blob = await item.promise
+        } catch (e) {
+          if (s.gen !== gen || e?.name === 'AbortError') return
+          // 预取阶段就失败了（合成端点偶发连接重置）：现取一次兜底
+          blob = await fetchSpeech(item.text, gen)
+        }
         if (s.gen !== gen) return
         await playBlob(blob, gen)
       } catch (e) {
@@ -511,9 +578,13 @@ export default function VoiceCall({ open, onClose }) {
     const clean = stripForSpeech(text)
     if (!clean) return
     const s = ttsRef.current
-    s.queue.push(clean)
+    // 一入队就立刻发合成请求，不等轮到播放：LLM 边出字边合成，
+    // 这样上一句还在播时下一句已经合成好，句间不再空等一次往返。
+    const promise = fetchSpeech(clean, s.gen)
+    promise.catch(() => {})   // 失败在播放时兜底重取，这里只防未处理的 rejection
+    s.queue.push({ text: clean, promise })
     if (!s.busy) { s.busy = true; pumpTts(s.gen) }
-  }, [pumpTts])
+  }, [fetchSpeech, pumpTts])
 
   // token → 字幕 + 按句切分送 TTS
   const feedToken = useCallback((token) => {
@@ -532,16 +603,18 @@ export default function VoiceCall({ open, onClose }) {
       ready.push(buf.slice(0, m.index + 1))
       buf = buf.slice(m.index + 1)
     }
-    // 长句在逗号/顿号处软切，保证首句尽快开播
-    if (buf.length > 45) {
-      const soft = Math.max(buf.lastIndexOf('，', 45), buf.lastIndexOf('、', 45),
-                           buf.lastIndexOf('”', 45), buf.lastIndexOf(' ', 45))
-      if (soft > 12) {
+    // 首句用更早的切分阈值，让声音尽快出来；后续用原阈值，避免切得太碎
+    const firstChunk = spokenRef.current === ''
+    const gate = firstChunk ? 20 : 45
+    if (buf.length > gate) {
+      const soft = Math.max(buf.lastIndexOf('，', gate), buf.lastIndexOf('、', gate),
+                           buf.lastIndexOf('”', gate), buf.lastIndexOf(' ', gate))
+      if (soft > (firstChunk ? 6 : 12)) {
         ready.push(buf.slice(0, soft + 1))
         buf = buf.slice(soft + 1)
-      } else if (buf.length > 75) {
-        ready.push(buf.slice(0, 45))
-        buf = buf.slice(45)
+      } else if (buf.length > (firstChunk ? 40 : 75)) {
+        ready.push(buf.slice(0, gate))
+        buf = buf.slice(gate)
       }
     }
     sentenceBufRef.current = buf
@@ -689,29 +762,34 @@ export default function VoiceCall({ open, onClose }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ── STT 引擎回调（barge-in 核心）────────────────────────────────
+  // ── STT 引擎回调（半双工：整个 AI 回合都不听）──────────────────
   const handleUtterance = useCallback((text) => {
     const p = phaseRef.current
     if (p === 'idle' || p === 'connecting') return
-    if (p === 'speaking') {
-      // 外放场景：识别到的可能是 AI 自己的声音，相似度高则视为回声不打断
-      const lastAi = [...messagesRef.current].reverse().find((m) => m.role === 'assistant')
-      if (echoSimilar(text, lastAi?.content || '') > 0.55) return
-      abortFetch(); newSpeakingGeneration()
-    } else if (p === 'thinking') {
-      // AI 还没出声，一开口就打断，无回声风险
-      abortFetch(); newSpeakingGeneration()
-    }
+    // 半双工：AI 回合内（思考/调用工具/出声）一律不接受输入。
+    // 免费/云端识别的拾音都没有可靠 AEC，外放会被识别成"用户在插话"；
+    // 而且识别器对同一段音频会重复提交（日志里同一句 4 秒发 5 轮），
+    // 每来一次就 abort 一次 → TTS 永远起不来。所以整轮一律丢弃。
+    if (p === 'thinking' || p === 'speaking') { engineRef.current?.discardTurn?.(); return }
+    // AI 刚说完的残留窗口：外放尾音还可能在识别缓冲里
+    if (Date.now() - speakEndAtRef.current < 1200) { engineRef.current?.discardTurn?.(); return }
+    // 识别器重复提交同一句（continuous 模式的已知行为）→ 丢弃
+    const norm = (text || '').replace(/\s/g, '')
+    const last = lastUtterRef.current
+    if (norm && norm === last.text && Date.now() - last.at < 3000) return
+    lastUtterRef.current = { text: norm, at: Date.now() }
     engineRef.current && engineRef.current.resetTurn()
     sendUtterance(text)
-  }, [abortFetch, newSpeakingGeneration, sendUtterance])
+  }, [sendUtterance])
 
-  const handleSpeechStart = useCallback(() => {
-    if (phaseRef.current === 'thinking') {
-      abortFetch(); newSpeakingGeneration()
-      sentenceBufRef.current = ''
-      setPhaseBoth('listening')
-    }
+  // AI 回合内不接受输入，这里只留空（旧逻辑会在 thinking 阶段打断自己）
+  const handleSpeechStart = useCallback(() => {}, [])
+
+  /** 半双工下的手动打断：停掉当前播放，回到聆听 */
+  const interruptSpeaking = useCallback(() => {
+    abortFetch(); newSpeakingGeneration()
+    sentenceBufRef.current = ''
+    setPhaseBoth('listening')
   }, [abortFetch, newSpeakingGeneration, setPhaseBoth])
 
   // ── 通话生命周期 ────────────────────────────────────────────────
@@ -906,6 +984,7 @@ export default function VoiceCall({ open, onClose }) {
   }, [setPhaseBoth, showBanner, voice, startRealtime, startFallback])
 
   const endCall = useCallback(() => {
+    clearTimeout(resumeTimerRef.current)
     try { realtimeRef.current && realtimeRef.current.stop() } catch {}
     realtimeRef.current = null
     try { engineRef.current && engineRef.current.stop() } catch {}
@@ -1122,6 +1201,18 @@ export default function VoiceCall({ open, onClose }) {
                     {toolHint}…
                   </motion.span>
                 )}
+                {/* 标准模式是半双工：AI 回合内不收麦克风，打断/取消要手动点 */}
+                <AnimatePresence>
+                  {(phase === 'speaking' || phase === 'thinking') && channel?.mode !== 'realtime' && (
+                    <motion.button
+                      initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                      onClick={interruptSpeaking}
+                      className="rounded-full border border-white/15 bg-white/10 px-3.5 py-1 text-[12px] text-stone-200 transition hover:bg-white/15 active:scale-95"
+                    >
+                      {phase === 'thinking' ? '取消这轮' : '点这里打断'}
+                    </motion.button>
+                  )}
+                </AnimatePresence>
               </div>
 
               {phase === 'idle' && (
@@ -1163,7 +1254,9 @@ export default function VoiceCall({ open, onClose }) {
                     试试说：<br />
                     「帮我总结一下昨天的内容」<br />
                     「昨天有什么重要的公众号更新」<br />
-                    回答时直接开口就能打断我
+                    {channel?.mode === 'realtime'
+                      ? '回答时直接开口就能打断我'
+                      : '我回答时点一下「打断」再说话'}
                   </p>
                 )}
                 {messages.map((m) => (
@@ -1209,7 +1302,7 @@ export default function VoiceCall({ open, onClose }) {
                 {channel?.mode === 'realtime'
                   ? `端到端实时全双工（${channel.provider === 'volc' ? '火山豆包 Seeduplex' : '千问 Realtime'}）· 像打电话一样自然对话，随时开口就能打断我`
                   : channel?.mode === 'fallback'
-                    ? `${channel.stt === 'cloud' ? '云端语音识别' : '浏览器语音识别 · 推荐 Edge 获得最佳效果'} · 我说话时你也可以随时开口打断`
+                    ? `${channel.stt === 'cloud' ? '云端语音识别' : '浏览器语音识别 · 推荐 Edge 获得最佳效果'} · 我说话时不收音，点「打断」可插话`
                     : '正在探测可用语音通道…'}
               </p>
               {channel?.mode === 'fallback' && channel.reason && (

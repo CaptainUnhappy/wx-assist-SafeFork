@@ -1,4 +1,4 @@
-﻿﻿﻿﻿import { useState, useEffect } from 'react'
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Gear, ChartLine, Scroll, Spinner, Sun, Moon, ChatCircleDots, Star, Eye, Newspaper, Chats, PaperPlaneTilt, Bell, QrCode, X, PuzzlePiece, Clock, Microphone } from '@phosphor-icons/react'
 import { API_BASE, getWsUrl } from './components/SharedComponents'
@@ -305,7 +305,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-[100dvh] bg-bg-main text-text-main font-sans transition-colors duration-200 relative overflow-hidden">
+    <div className="min-h-[100dvh] bg-bg-main text-text-main font-sans transition-colors duration-200 relative overflow-x-clip">
       {/* Ambient wave background */}
       <AmbientWaveBackground />
 
