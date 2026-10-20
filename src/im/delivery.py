@@ -320,6 +320,31 @@ class DeliveryService:
         with self._db_lock, self._connect() as conn:
             return [dict(row) for row in conn.execute(sql, args).fetchall()]
 
+    def attempts_for_outbox(self, outbox_ids) -> dict[int, list[dict]]:
+        """Group recent delivery attempts by outbox id, for list rendering.
+
+        Loads a whole page in one query; callers render the latest attempt per
+        platform so each badge reflects what actually happened.
+        """
+        ids = sorted({
+            int(item) for item in (outbox_ids or [])
+            if str(item).strip().isdigit() and int(item) > 0
+        })
+        if not ids:
+            return {}
+        grouped: dict[int, list[dict]] = {}
+        placeholders = ",".join("?" * len(ids))
+        sql = (
+            "SELECT outbox_id, platform, status, provider_error, created_at, attempt_no "
+            f"FROM im_delivery_attempts WHERE outbox_id IN ({placeholders}) "
+            "ORDER BY created_at ASC"
+        )
+        with self._db_lock, self._connect() as conn:
+            for row in conn.execute(sql, ids).fetchall():
+                item = dict(row)
+                grouped.setdefault(int(item["outbox_id"]), []).append(item)
+        return grouped
+
 
 _service: Optional[DeliveryService] = None
 _service_lock = threading.Lock()

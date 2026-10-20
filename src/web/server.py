@@ -3622,14 +3622,41 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 status=(qs.get("status") or [""])[0],
                 limit=limit,
             )
+            # Per-platform delivery outcomes drive the badges on each card;
+            # push_status alone cannot say which channel succeeded.
+            try:
+                from src.im.delivery import get_delivery_service
+                grouped = get_delivery_service().attempts_for_outbox(
+                    [row.get("id") for row in notifications],
+                )
+                for row in notifications:
+                    row["push_attempts"] = grouped.get(int(row.get("id") or 0), [])
+            except Exception as exc:
+                logger.warning("Load push attempts failed: %s", exc)
+                for row in notifications:
+                    row.setdefault("push_attempts", [])
             self.send_json({"ok": True, "notifications": notifications})
             return
 
         # ── API: Assistant — pending notifications ──────────────────────
-        if self.path == "/api/assistant/notifications/pending":
+        if self.path.startswith("/api/assistant/notifications/pending"):
+            from urllib.parse import urlparse, parse_qs
             from src.assistant.outbox import Outbox
-            outbox = Outbox()
-            pending = outbox.get_pending(limit=20)
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+
+            def _int_param(name, default, low, high):
+                try:
+                    value = int((qs.get(name) or [default])[0])
+                except (TypeError, ValueError):
+                    value = default
+                return max(low, min(value, high))
+
+            pending = Outbox().get_pending(
+                limit=_int_param("limit", 20, 1, 200),
+                notif_type=(qs.get("type") or [""])[0],
+                since_id=_int_param("since_id", 0, 0, 2**53),
+            )
             self.send_json({"ok": True, "notifications": pending})
             return
 

@@ -278,13 +278,14 @@ export function ComboInput({ value, onChange, options = [], placeholder }) {
 
 // ── SectionHeader ─────────────────────────────────────────────────
 // Unified section header used across AssistantPanel, FavoritesTab, etc.
-export function SectionHeader({ title, accent = 'var(--brand-green)', icon: Icon, subtitle, action }) {
+export function SectionHeader({ title, accent = 'var(--brand-green)', icon: Icon, subtitle, action, hint }) {
   return (
     <div className="mb-5">
       <div className="flex items-center gap-2.5 mb-1">
         <div className="w-1.5 h-5 rounded-full shadow-sm" style={{ backgroundColor: accent }} />
         <h3 className="text-base font-semibold tracking-tight text-text-main">{title}</h3>
         {Icon && <Icon size={18} className="text-text-muted" />}
+        {hint}
         {action && <div className="ml-auto">{action}</div>}
       </div>
       {subtitle && <p className="text-xs text-text-muted leading-relaxed pl-4">{subtitle}</p>}

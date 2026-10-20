@@ -3,10 +3,10 @@ import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle, Warning, Spinner, MagnifyingGlass, Bell, Clock, ChatCircle, CaretDown, CaretRight, EnvelopeOpen, Archive, Lightning, Trash, X, Plus, Play, Eye } from '@phosphor-icons/react'
+import { CheckCircle, Warning, Spinner, MagnifyingGlass, Bell, Clock, ChatCircle, CaretDown, CaretRight, EnvelopeOpen, Archive, Lightning, Trash, X, Plus, Play, Eye, Info } from '@phosphor-icons/react'
 import { Toggle, SectionHeader, TagInput, Input, API_BASE, getWsUrl, isRegexTag } from './SharedComponents'
 import { WEEKDAY_LABELS, parseCronExpr, cronToLabel } from '../utils/cron'
-import { getDigestPreviewContent } from '../utils/digestPreview.mjs'
+import { getNotificationPreview, toPlainPreview } from '../utils/digestPreview.mjs'
 
 const pageTransition = {
   initial: { opacity: 0, x: 12 },
@@ -236,8 +236,8 @@ const notificationTypes = {
 }
 
 const notificationStatuses = {
-  pending: '待投递',
-  delivered: '已投递',
+  pending: '待消费',
+  delivered: '已消费',
   ignored: '已忽略',
   failed: '失败',
 }
@@ -247,6 +247,55 @@ const statusColors = {
   delivered: 'var(--brand-green)',
   ignored: 'var(--text-muted)',
   failed: 'var(--status-error)',
+}
+
+const PUSH_PLATFORM_LABELS = {
+  ilink: '微信',
+  wechat: '微信',
+  qqbot: 'QQ',
+  feishu: '飞书',
+}
+
+const NOTIFICATION_API = `${window.location.origin}/api/assistant/notifications`
+
+// Short hover hint; the copy stays one sentence on purpose.
+function Hint({ text }) {
+  return (
+    <span className="relative inline-flex group/hint cursor-help align-middle">
+      <Info size={14} className="text-text-muted/70" weight="bold" />
+      <span className="pointer-events-none absolute left-0 top-full z-50 mt-2 hidden w-max max-w-[70vw] rounded-lg border border-border-main bg-bg-card px-3 py-2 text-[11px] font-normal leading-relaxed text-text-main shadow-xl group-hover/hint:block">
+        {text}
+      </span>
+    </span>
+  )
+}
+
+// Latest delivery outcome per platform, so each badge reflects a real attempt.
+function platformBadges(notification) {
+  const attempts = Array.isArray(notification.push_attempts) ? notification.push_attempts : []
+  const latest = new Map()
+  for (const attempt of attempts) {
+    const raw = String(attempt?.platform || '').trim()
+    if (!raw) continue
+    let platforms = [raw]
+    if (raw.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) platforms = parsed.map(String)
+      } catch {
+        // Keep the raw value so nothing silently disappears.
+      }
+    }
+    for (const platform of platforms) {
+      const name = platform.trim()
+      if (name) latest.set(name, attempt)
+    }
+  }
+  return [...latest.entries()].map(([platform, attempt]) => ({
+    label: PUSH_PLATFORM_LABELS[platform] || platform,
+    ok: String(attempt?.status || '') === 'success',
+    error: attempt?.provider_error || '',
+  }))
 }
 
 // ── Main component ──────────────────────────────────────────────────
@@ -272,6 +321,7 @@ export default function AssistantPanel() {
   const [expandedDigests, setExpandedDigests] = useState({})
   const [expandedProfiles, setExpandedProfiles] = useState({})
   const [notificationExpanded, setNotificationExpanded] = useState(false)
+  const [apiDocOpen, setApiDocOpen] = useState(false)
   // Inline editors
   const [showAlertEditor, setShowAlertEditor] = useState(false)
   const [showDigestEditor, setShowDigestEditor] = useState(false)
@@ -428,19 +478,6 @@ export default function AssistantPanel() {
     })
   }
 
-  function updateQueue(patch) {
-    setDirty(true)
-    setConfig(prev => {
-      const next = {
-        ...prev,
-        notification_queue: { ...(prev.notification_queue || {}), ...patch },
-        outbox_retention_hours: patch.retention_hours ?? prev.outbox_retention_hours,
-      }
-      scheduleAutoSave(next)
-      return next
-    })
-  }
-
   // Auto-save with debounce: switches/toggles save immediately,
   // text/tag inputs debounce 800ms
   function scheduleAutoSave(configToSave, immediate = false) {
@@ -488,19 +525,6 @@ export default function AssistantPanel() {
     setDirty(true)
     setConfig(prev => {
       const next = { ...prev, [field]: value }
-      scheduleAutoSave(next, true)
-      return next
-    })
-  }
-
-  function updateQueueAndSave(patch) {
-    setDirty(true)
-    setConfig(prev => {
-      const next = {
-        ...prev,
-        notification_queue: { ...(prev.notification_queue || {}), ...patch },
-        outbox_retention_hours: patch.retention_hours ?? prev.outbox_retention_hours,
-      }
       scheduleAutoSave(next, true)
       return next
     })
@@ -666,11 +690,12 @@ export default function AssistantPanel() {
         <span className={`font-semibold ${assistantOn ? 'text-brand-green-hover dark:text-brand-green' : 'text-text-muted'}`}>
           {assistantOn ? '微信助手已开启' : '微信助手已关闭'}
         </span>
-        <span className="text-text-muted">·</span>
+        {(alertCount > 0 || digestCount > 0) && <span className="text-text-muted">·</span>}
         <span className="text-xs text-text-muted">
-          {alertCount > 0 && `${alertCount} 个提醒群 · `}
-          {digestCount > 0 && `${digestCount} 个摘要分组 · `}
-          {config.notification_queue?.enabled !== false ? '通知队列开启' : '通知队列关闭'}
+          {[
+            alertCount > 0 ? `${alertCount} 个提醒群` : '',
+            digestCount > 0 ? `${digestCount} 个摘要分组` : '',
+          ].filter(Boolean).join(' · ')}
         </span>
         <div className="ml-auto flex items-center gap-2 shrink-0">
           <span className={`text-xs font-semibold uppercase tracking-wider ${assistantOn ? 'text-brand-green' : 'text-text-muted'}`}>
@@ -1119,6 +1144,7 @@ export default function AssistantPanel() {
           accent="var(--brand-green)"
           icon={Bell}
           subtitle="查看提醒和摘要的通知记录"
+          hint={<Hint text="系统产生的通知会写进这里的队列，同时尝试推送到你绑定的渠道。外部程序也可以通过队列接口拉取未处理的通知。" />}
           action={
             <button
               onClick={() => setNotificationExpanded(!notificationExpanded)}
@@ -1141,51 +1167,30 @@ export default function AssistantPanel() {
               <div className="space-y-5">
                 {/* Queue status card */}
                 <div className="bg-bg-card rounded-2xl border border-border-main shadow-sm overflow-hidden">
-                  <div className="p-6 space-y-4">
-                    <div className="flex items-center justify-between gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${
-                          config.notification_queue?.enabled !== false
-                            ? 'bg-brand-green/10 text-brand-green'
-                            : 'bg-bg-raised text-text-muted'
-                        }`}>
-                          <EnvelopeOpen size={18} />
-                        </div>
-                        <div>
-                          <p className="text-sm text-text-main font-medium">通知投递队列</p>
-                          <p className="text-xs text-text-muted mt-0.5">
-                            {config.notification_queue?.enabled !== false ? '队列运行中' : '队列已暂停'}
-                          </p>
-                        </div>
-                      </div>
-                      <Toggle enabled={config.notification_queue?.enabled !== false} onChange={v => updateQueueAndSave({ enabled: v })} />
+                  <div className="flex flex-wrap items-center gap-3 px-6 py-4">
+                    <div className="w-9 h-9 rounded-lg flex items-center justify-center bg-brand-green/10 text-brand-green">
+                      <EnvelopeOpen size={18} />
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pl-12">
-                      <div>
-                        <label className="text-xs text-text-muted block mb-1.5">通知保留时间</label>
-                        <div className="flex items-center gap-2">
-                          <input type="number" min={1} max={168} value={config.notification_queue?.retention_hours || 24}
-                            onChange={e => updateQueue({ retention_hours: parseInt(e.target.value) || 24 })}
-                            className="w-20 bg-bg-raised border border-border-main rounded-lg px-3 py-2 text-sm text-text-main focus:outline-none focus:border-brand-green focus:ring-1 focus:ring-brand-green/15 transition-all"
-                          />
-                          <span className="text-xs text-text-muted">小时</span>
-                        </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-sm text-text-main font-medium">通知投递队列</p>
+                        <Hint text="给外部程序取通知的队列，消费后需调用 /ack（或 /ignore）进行回执。" />
                       </div>
-                      <div>
-                        <label className="text-xs text-text-muted block mb-1.5">API 拉取地址</label>
-                        <code className="text-xs text-text-muted bg-bg-raised border border-border-main rounded-lg px-3 py-2 block truncate font-mono">
-                          GET /api/assistant/notifications/pending
-                        </code>
-                      </div>
+                      <p className="text-xs text-text-muted mt-0.5">供外部程序拉取待消费通知，处理完调用 ack 回执。</p>
                     </div>
-                    <div className="pl-12">
+                    <div className="ml-auto flex items-center gap-2">
+                      <button
+                        onClick={() => setApiDocOpen(true)}
+                        className="text-xs px-3 py-1.5 rounded-lg border border-border-main text-text-main hover:bg-bg-raised transition-colors cursor-pointer"
+                      >接口文档</button>
                       <button
                         onClick={createTestNotification}
-                        className="text-sm text-brand-green-hover hover:underline cursor-pointer font-medium"
-                      >+ 写入一条测试通知</button>
+                        className="text-xs px-3 py-1.5 rounded-lg bg-brand-green/10 text-brand-green-hover hover:bg-brand-green/20 transition-colors cursor-pointer"
+                      >写入测试通知</button>
                     </div>
                   </div>
                 </div>
+                {apiDocOpen && <NotificationApiDocModal onClose={() => setApiDocOpen(false)} />}
 
                 {/* Notification history */}
                 <div className="bg-bg-card rounded-2xl border border-border-main shadow-sm overflow-hidden">
@@ -1195,10 +1200,14 @@ export default function AssistantPanel() {
                         <div className="w-9 h-9 rounded-lg flex items-center justify-center bg-bg-raised text-text-muted">
                           <Archive size={18} />
                         </div>
-                        <p className="text-sm text-text-main font-medium">通知记录</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-sm text-text-main font-medium">通知记录</p>
+                          <Hint text="队列里每条通知的处理状态，可以手动标记。" />
+                        </div>
                       </div>
                       <button onClick={loadNotifications} className="text-sm text-brand-green-hover hover:underline cursor-pointer font-medium">刷新</button>
                     </div>
+                    <p className="text-xs text-text-muted">「状态」是队列处理状态；渠道推送结果在「系统配置 → 消息推送 → 推送记录」。</p>
                     {/* Filters */}
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                       <SearchableGroupSelect
@@ -1217,8 +1226,8 @@ export default function AssistantPanel() {
                       </select>
                       <select value={filters.status} onChange={e => setFilters(prev => ({ ...prev, status: e.target.value }))} className="bg-bg-raised border border-border-main rounded-lg px-3 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand-green focus:ring-1 focus:ring-brand-green/15 transition-all">
                         <option value="">全部状态</option>
-                        <option value="pending">待投递</option>
-                        <option value="delivered">已投递</option>
+                        <option value="pending">待消费</option>
+                        <option value="delivered">已消费</option>
                         <option value="ignored">已忽略</option>
                         <option value="failed">失败</option>
                       </select>
@@ -2169,8 +2178,119 @@ function DeleteButton({ onDelete }) {
   )
 }
 
+function NotificationApiDocModal({ onClose }) {
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
+
+  const params = [
+    ['limit', 'int', '返回条数，默认 20，范围 1–200'],
+    ['type', 'string', 'keyword_alert / group_digest / oa_digest / oa_article_alert'],
+    ['since_id', 'int', '仅返回 id 大于该值的记录，用于增量拉取'],
+  ]
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+      onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="notification-api-doc-title"
+        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-border-main bg-bg-card shadow-2xl"
+      >
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border-main px-5 py-4">
+          <div className="min-w-0">
+            <h2 id="notification-api-doc-title" className="text-base font-semibold text-text-main">通知队列接口文档</h2>
+            <p className="mt-1 text-xs text-text-muted">外部程序拉取待消费通知，处理后回执。</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭接口文档" title="关闭" className="shrink-0 rounded-md p-1.5 text-text-muted transition hover:bg-bg-raised hover:text-text-main">
+            <X size={18} />
+          </button>
+        </header>
+        <div className="min-h-0 space-y-5 overflow-y-auto px-5 py-5 text-xs">
+          <div className="space-y-1.5">
+            <p className="font-medium text-text-main">基础地址</p>
+            <code className="text-text-main bg-bg-raised border border-border-main rounded-lg px-3 py-2 block break-all font-mono">
+              {window.location.origin}
+            </code>
+            <p className="text-text-muted">非本机访问需先完成设备配对，并携带 lan_session Cookie。</p>
+          </div>
+
+          <div className="space-y-1.5">
+            <p className="font-medium text-text-main">拉取待消费通知</p>
+            <code className="text-text-main bg-bg-raised border border-border-main rounded-lg px-3 py-2 block break-all font-mono">
+              {`GET ${NOTIFICATION_API}/pending`}
+            </code>
+            <table className="w-full text-left text-text-muted">
+              <thead>
+                <tr className="text-text-main">
+                  <th className="w-20 pb-1 font-medium">参数</th>
+                  <th className="w-14 pb-1 font-medium">类型</th>
+                  <th className="pb-1 font-medium">说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                {params.map(([name, type, desc]) => (
+                  <tr key={name}>
+                    <td className="py-0.5 pr-2 font-mono">{name}</td>
+                    <td className="py-0.5 pr-2">{type}</td>
+                    <td className="py-0.5">{desc}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-text-main pt-1">响应</p>
+            <code className="text-text-main bg-bg-raised border border-border-main rounded-lg px-3 py-2 block whitespace-pre break-all font-mono leading-relaxed">
+{`{
+  "ok": true,
+  "notifications": [
+    {
+      "id": 1,
+      "type": "oa_article_alert",
+      "title": "...",
+      "content": "{...}",
+      "status": "pending",
+      "push_status": "success"
+    }
+  ]
+}`}
+            </code>
+            <p className="text-text-muted">content 为原始内容；摘要类为 JSON 字符串，可读正文在 display 字段。</p>
+          </div>
+
+          <div className="space-y-1.5">
+            <p className="font-medium text-text-main">回执</p>
+            <code className="text-text-main bg-bg-raised border border-border-main rounded-lg px-3 py-2 block break-all font-mono">
+              {`POST ${NOTIFICATION_API}/{id}/ack`}
+            </code>
+            <code className="text-text-main bg-bg-raised border border-border-main rounded-lg px-3 py-2 block break-all font-mono">
+              {`POST ${NOTIFICATION_API}/{id}/ignore`}
+            </code>
+            <p className="text-text-muted leading-relaxed">
+              {`{id} 为通知的 id。ack 置为已消费，ignore 置为已忽略；两者都不会再出现在 pending 结果中。响应 {"ok": true}。`}
+            </p>
+          </div>
+
+          <div className="space-y-1">
+            <p className="font-medium text-text-main">状态说明</p>
+            <p className="text-text-muted">status：pending 待消费 / delivered 已消费 / ignored 已忽略（队列状态）</p>
+            <p className="text-text-muted">push_status：success / partial / failed / skipped（渠道发送结果，与 status 无关）</p>
+          </div>
+        </div>
+      </section>
+    </div>,
+    document.body,
+  )
+}
+
 function DigestPreviewModal({ notification, onClose }) {
-  const preview = getDigestPreviewContent(notification)
+  const preview = getNotificationPreview(notification)
 
   useEffect(() => {
     function handleKeyDown(event) {
@@ -2238,10 +2358,14 @@ function NotificationCard({ notification, onAck, onIgnore }) {
   const statusColor = statusColors[notification.status] || '#a0aec0'
   const [expanded, setExpanded] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
-  const rawContent = notification.content || ''
-  const isDigest = notification.type === 'group_digest'
-  const isLong = rawContent.length > 200
-  const displayContent = expanded ? rawContent : (isLong ? rawContent.slice(0, 200) + '...' : rawContent)
+  // Cards show readable text for every notification type instead of the raw payload.
+  const preview = getNotificationPreview(notification)
+  const cardText = preview.markdown ? toPlainPreview(preview.content) : preview.content
+  const isLong = cardText.length > 200
+  const displayContent = expanded ? cardText : (isLong ? cardText.slice(0, 200) + '...' : cardText)
+  const badges = platformBadges(notification)
+  const unbound = !badges.length && notification.push_status === 'skipped'
+  const pushFailed = !badges.length && notification.push_status === 'failed'
   return (
     <>
       <div className="bg-bg-raised/40 border border-border-main rounded-xl p-4 transition-all hover:border-border-main/80">
@@ -2255,6 +2379,23 @@ function NotificationCard({ notification, onAck, onIgnore }) {
               <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: statusColor }} />
               {notificationStatuses[notification.status] || notification.status}
             </span>
+            {badges.map(badge => (
+              <span
+                key={badge.label}
+                title={badge.error || ''}
+                className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium ${
+                  badge.ok
+                    ? 'bg-brand-green/10 text-brand-green-hover dark:text-brand-green'
+                    : 'bg-status-error-soft text-status-error'
+                }`}
+              >{badge.label}</span>
+            ))}
+            {unbound && (
+              <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium bg-bg-raised text-text-muted" title={notification.push_error || '未绑定渠道'}>未绑定渠道</span>
+            )}
+            {pushFailed && (
+              <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium bg-status-error-soft text-status-error" title={notification.push_error || ''}>推送失败</span>
+            )}
             <span className="text-xs text-text-muted">{notification.created_at}</span>
           </div>
           <p className="text-sm text-text-main font-medium truncate">{notification.title || '无标题'}</p>
@@ -2266,16 +2407,16 @@ function NotificationCard({ notification, onAck, onIgnore }) {
             </button>
           )}
         </div>
-        {(notification.status === 'pending' || isDigest) && (
+        {(notification.status === 'pending' || isLong) && (
           <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
-            {isDigest && (
+            {isLong && (
               <button type="button" onClick={() => setPreviewOpen(true)} className="inline-flex items-center gap-1.5 rounded-full bg-brand-green/10 px-3.5 py-1.5 text-xs font-medium text-brand-green-hover transition-colors hover:bg-brand-green/20">
-                <Eye size={14} />预览摘要
+                <Eye size={14} />预览
               </button>
             )}
             {notification.status === 'pending' && (
               <>
-                <button onClick={onAck} className="text-xs px-3.5 py-1.5 rounded-full bg-brand-green/10 text-brand-green-hover hover:bg-brand-green/20 transition-colors cursor-pointer font-medium">标记投递</button>
+                <button onClick={onAck} className="text-xs px-3.5 py-1.5 rounded-full bg-brand-green/10 text-brand-green-hover hover:bg-brand-green/20 transition-colors cursor-pointer font-medium">标记已消费</button>
                 <button onClick={onIgnore} className="text-xs px-3.5 py-1.5 rounded-full bg-bg-raised text-text-muted hover:text-status-error hover:bg-status-error-soft transition-colors cursor-pointer">忽略</button>
               </>
             )}

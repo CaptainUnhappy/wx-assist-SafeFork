@@ -151,9 +151,17 @@ class Outbox:
             logger.info("Outbox: #%d type=%s group=%s title=%s", nid, notif_type, group_name, title)
             return nid
 
-    def get_pending(self, limit: int = 20) -> list[dict]:
-        """Return pending notifications, oldest first."""
-        return self.list_notifications(status="pending", limit=limit)
+    def get_pending(self, limit: int = 20, notif_type: str = "",
+                    since_id: int = 0) -> list[dict]:
+        """Return pending notifications for pull-based consumers.
+
+        since_id lets an external consumer poll incrementally without missing
+        records created between two requests.
+        """
+        return self.list_notifications(
+            notif_type=notif_type, status="pending", limit=limit,
+            since_id=since_id,
+        )
 
     def get_by_url(self, url: str, notif_type: str = "") -> Optional[dict]:
         """Return the newest notification for an article URL."""
@@ -194,7 +202,7 @@ class Outbox:
 
     def list_notifications(self, chat_id: str = "", group_name: str = "",
                            notif_type: str = "", status: str = "",
-                           limit: int = 50) -> list[dict]:
+                           limit: int = 50, since_id: int = 0) -> list[dict]:
         """Return notifications filtered for Dashboard browsing."""
         where = []
         params: list[object] = []
@@ -210,6 +218,9 @@ class Outbox:
         if status:
             where.append("status = ?")
             params.append(status)
+        if since_id:
+            where.append("id > ?")
+            params.append(int(since_id))
         clause = " WHERE " + " AND ".join(where) if where else ""
         params.append(max(1, min(int(limit or 50), 200)))
         with self._get_conn() as conn:
