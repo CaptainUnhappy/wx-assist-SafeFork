@@ -1,8 +1,12 @@
 ﻿import { useState, useEffect, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle, Warning, Spinner, MagnifyingGlass, Bell, Clock, ChatCircle, CaretDown, CaretRight, EnvelopeOpen, Archive, Lightning, Trash, X, Plus, Play } from '@phosphor-icons/react'
+import { CheckCircle, Warning, Spinner, MagnifyingGlass, Bell, Clock, ChatCircle, CaretDown, CaretRight, EnvelopeOpen, Archive, Lightning, Trash, X, Plus, Play, Eye } from '@phosphor-icons/react'
 import { Toggle, SectionHeader, TagInput, Input, API_BASE, getWsUrl, isRegexTag } from './SharedComponents'
 import { WEEKDAY_LABELS, parseCronExpr, cronToLabel } from '../utils/cron'
+import { getDigestPreviewContent } from '../utils/digestPreview.mjs'
 
 const pageTransition = {
   initial: { opacity: 0, x: 12 },
@@ -2165,14 +2169,82 @@ function DeleteButton({ onDelete }) {
   )
 }
 
+function DigestPreviewModal({ notification, onClose }) {
+  const preview = getDigestPreviewContent(notification)
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+      onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="digest-preview-title"
+        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-border-main bg-bg-card shadow-2xl"
+      >
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border-main px-5 py-4">
+          <div className="min-w-0">
+            <h2 id="digest-preview-title" className="text-base font-semibold text-text-main">{notification.title || '群聊摘要'}</h2>
+            <p className="mt-1 truncate text-xs text-text-muted">{notification.group_name || notification.chat_id || '未知分组'} · {notification.created_at || '时间未知'}</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭摘要预览" title="关闭" className="shrink-0 rounded-md p-1.5 text-text-muted transition hover:bg-bg-raised hover:text-text-main">
+            <X size={18} />
+          </button>
+        </header>
+        <div className="min-h-0 overflow-y-auto px-5 py-5">
+          {preview.markdown ? (
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                h1: ({ children }) => <h1 className="mb-4 mt-6 text-xl font-semibold text-text-main first:mt-0">{children}</h1>,
+                h2: ({ children }) => <h2 className="mb-3 mt-5 text-lg font-semibold text-text-main">{children}</h2>,
+                h3: ({ children }) => <h3 className="mb-2 mt-4 text-base font-semibold text-text-main">{children}</h3>,
+                p: ({ children }) => <p className="my-3 whitespace-pre-wrap leading-7 text-text-main/90">{children}</p>,
+                ul: ({ children }) => <ul className="my-3 list-disc space-y-1 pl-6 text-text-main/90">{children}</ul>,
+                ol: ({ children }) => <ol className="my-3 list-decimal space-y-1 pl-6 text-text-main/90">{children}</ol>,
+                li: ({ children }) => <li className="leading-7">{children}</li>,
+                blockquote: ({ children }) => <blockquote className="my-3 border-l-2 border-brand-green/50 pl-4 text-text-muted">{children}</blockquote>,
+                a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer" className="text-brand-green-hover underline underline-offset-2">{children}</a>,
+                pre: ({ children }) => <pre className="my-3 overflow-x-auto rounded-md bg-bg-raised p-3 text-sm leading-6 text-text-main">{children}</pre>,
+                code: ({ children }) => <code className="rounded bg-bg-raised px-1 py-0.5 font-mono text-[0.9em] text-text-main">{children}</code>,
+                hr: () => <hr className="my-5 border-border-main" />,
+                table: ({ children }) => <table className="my-3 min-w-full border-collapse text-left text-sm">{children}</table>,
+                th: ({ children }) => <th className="border border-border-main bg-bg-raised px-3 py-2 font-semibold text-text-main">{children}</th>,
+                td: ({ children }) => <td className="border border-border-main px-3 py-2 align-top text-text-main/90">{children}</td>,
+              }}
+            >
+              {preview.content}
+            </ReactMarkdown>
+          ) : (
+            <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-7 text-text-main/90">{preview.content}</pre>
+          )}
+        </div>
+      </section>
+    </div>,
+    document.body,
+  )
+}
+
 function NotificationCard({ notification, onAck, onIgnore }) {
   const statusColor = statusColors[notification.status] || '#a0aec0'
   const [expanded, setExpanded] = useState(false)
+  const [previewOpen, setPreviewOpen] = useState(false)
   const rawContent = notification.content || ''
+  const isDigest = notification.type === 'group_digest'
   const isLong = rawContent.length > 200
   const displayContent = expanded ? rawContent : (isLong ? rawContent.slice(0, 200) + '...' : rawContent)
   return (
-    <div className="bg-bg-raised/40 border border-border-main rounded-xl p-4 transition-all hover:border-border-main/80">
+    <>
+      <div className="bg-bg-raised/40 border border-border-main rounded-xl p-4 transition-all hover:border-border-main/80">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap mb-2">
@@ -2194,14 +2266,25 @@ function NotificationCard({ notification, onAck, onIgnore }) {
             </button>
           )}
         </div>
-        {notification.status === 'pending' && (
-          <div className="flex gap-1.5 shrink-0">
-            <button onClick={onAck} className="text-xs px-3.5 py-1.5 rounded-full bg-brand-green/10 text-brand-green-hover hover:bg-brand-green/20 transition-colors cursor-pointer font-medium">标记投递</button>
-            <button onClick={onIgnore} className="text-xs px-3.5 py-1.5 rounded-full bg-bg-raised text-text-muted hover:text-status-error hover:bg-status-error-soft transition-colors cursor-pointer">忽略</button>
+        {(notification.status === 'pending' || isDigest) && (
+          <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
+            {isDigest && (
+              <button type="button" onClick={() => setPreviewOpen(true)} className="inline-flex items-center gap-1.5 rounded-full bg-brand-green/10 px-3.5 py-1.5 text-xs font-medium text-brand-green-hover transition-colors hover:bg-brand-green/20">
+                <Eye size={14} />预览摘要
+              </button>
+            )}
+            {notification.status === 'pending' && (
+              <>
+                <button onClick={onAck} className="text-xs px-3.5 py-1.5 rounded-full bg-brand-green/10 text-brand-green-hover hover:bg-brand-green/20 transition-colors cursor-pointer font-medium">标记投递</button>
+                <button onClick={onIgnore} className="text-xs px-3.5 py-1.5 rounded-full bg-bg-raised text-text-muted hover:text-status-error hover:bg-status-error-soft transition-colors cursor-pointer">忽略</button>
+              </>
+            )}
           </div>
         )}
       </div>
-    </div>
+      </div>
+      {previewOpen && <DigestPreviewModal notification={notification} onClose={() => setPreviewOpen(false)} />}
+    </>
   )
 }
 
