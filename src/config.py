@@ -404,6 +404,23 @@ def load_config() -> BotConfig:
     return BotConfig(**kwargs)
 
 
+def _read_env_pairs() -> dict:
+    """Read .env into a dict (missing/unreadable file → empty dict)."""
+    env_path = find_env_file()
+    data: dict[str, str] = {}
+    if not env_path or not env_path.exists():
+        return data
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                data[k.strip()] = v.strip()
+    except Exception:
+        return {}
+    return data
+
+
 def is_onboarding_done() -> bool:
     """Check if onboarding has been completed without loading full config.
 
@@ -417,3 +434,19 @@ def is_onboarding_done() -> bool:
                 return line.split("=", 1)[1].strip().lower() == "true"
         return False  # .env exists but no ONBOARDING_DONE key
     return False  # No .env found
+
+
+def is_wechat_ready() -> bool:
+    """引导完成且微信连接配置可用（决定是否直接进工作台）。
+
+    wcdb 后端必须有 WCDB_KEY：只写了 ONBOARDING_DONE=true 但没有密钥，
+    进工作台也读不了库（只会看到"未连接"），应该回到引导流程。
+    mac_hybrid 后端不用密钥，只看 ONBOARDING_DONE。
+    """
+    data = _read_env_pairs()
+    if (data.get("ONBOARDING_DONE", "") or "").strip().lower() != "true":
+        return False
+    backend = (data.get("WECHAT_BACKEND", "wcdb") or "wcdb").strip().lower()
+    if backend != "wcdb":
+        return True
+    return bool((data.get("WCDB_KEY", "") or "").strip())

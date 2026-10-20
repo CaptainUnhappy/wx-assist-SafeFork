@@ -490,8 +490,10 @@ def main():
     setup_logging(level=log_level, log_file="data/bot.log")
 
     # Check if onboarding is needed
-    from src.config import is_onboarding_done
-    onboarding_needed = not is_onboarding_done()
+    # 只看 ONBOARDING_DONE 不够：没有 WCDB_KEY 时进工作台也读不了库，
+    # 用户会卡在"未连接→重新连接"里，所以必须回到引导流程。
+    from src.config import is_wechat_ready
+    onboarding_needed = not is_wechat_ready()
 
     # Always start web server (needed for both onboarding and dashboard)
     from src.web.server import start_web_server

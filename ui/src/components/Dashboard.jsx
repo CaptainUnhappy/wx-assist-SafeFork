@@ -661,145 +661,49 @@ export default function Dashboard({ status, onTabChange }) {
 // ── Key extraction banner ─────────────────────────────
 
 const API = API_BASE
-const EXTRACTION_PHASE_MAP = {
-  hooking:         { label: '正在尝试连接...' },
-  waiting_exit:    { label: '请退出程序' },
-  waiting_login:   { label: '等待登录' },
-  hooking_restart: { label: '正在连接...' },
-}
 
+// 连接凭证失效的处理：不在工作台原地提取。
+// 工作台里没有数据目录选择这一步，提取成功后也没法继续；之前就是卡在
+// "检测到微信启动 (PID xxx) 正在建立连接"。统一回到引导页重走一遍。
 function KeyExtractionBanner() {
-  const [phase, setPhase] = useState('idle')
-  const [msg, setMsg] = useState('')
-  const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
-  const pollRef = useRef(null)
 
-  useEffect(() => {
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [])
-
-  async function handleExtract() {
+  async function handleReconfigure() {
     setBusy(true)
-    setPhase('extracting')
-    setMsg('正在准备...')
-    setResult(null)
     try {
       await fetch(`${API}/api/onboarding/reset`, { method: 'POST' })
-      const startRes = await fetch(`${API}/api/onboarding/step1`, { method: 'POST' })
-      const start = await startRes.json()
-      if (!start.ok) {
-        setPhase('error')
-        setMsg(start.message || '启动失败，请稍后重试')
-        setBusy(false)
-        return
-      }
-
-      pollRef.current = setInterval(async () => {
-        try {
-          const res = await fetch(`${API}/api/onboarding/step1-status`)
-          const s = await res.json()
-
-          if (s.phase === 'waiting_exit' || s.phase === 'waiting_login'
-              || s.phase === 'hooking' || s.phase === 'hooking_restart') {
-            setPhase(s.phase)
-            setMsg(s.message || '')
-          } else if (s.phase === 'done' && s.result) {
-            clearInterval(pollRef.current)
-            pollRef.current = null
-            setPhase('done')
-            setMsg('')
-            setResult(s.result)
-            setBusy(false)
-          } else if (s.phase === 'timeout' || s.phase === 'error') {
-            clearInterval(pollRef.current)
-            pollRef.current = null
-            setPhase(s.phase)
-            setMsg(s.message || (s.phase === 'timeout' ? '超时，请重试' : '提取失败'))
-            setBusy(false)
-          }
-        } catch {}
-      }, 1000)
-    } catch {
-      setPhase('error')
-      setMsg('无法连接服务器')
-      setBusy(false)
-    }
+    } catch {}
+    window.location.reload()
   }
-
-  const phaseMeta = EXTRACTION_PHASE_MAP[phase]
-  const isDone = phase === 'done'
 
   return (
     <motion.div
       initial={{ opacity: 0, y: -6 }}
       animate={{ opacity: 1, y: 0 }}
-      className={`flex flex-col gap-3.5 p-5 rounded-xl border transition-all duration-500 ${
-        isDone
-          ? 'bg-brand-green/[0.06] border-brand-green/20 text-brand-green-hover dark:text-brand-green'
-          : 'bg-status-error-soft border-status-error/20 text-status-error'
-      }`}
+      className="flex flex-col gap-3.5 p-5 rounded-xl border bg-status-error-soft border-status-error/20 text-status-error"
     >
       <div className="flex items-center gap-2 text-[13px] font-semibold">
-        {isDone ? (
-          <CheckCircle size={16} weight="fill" className="text-brand-green" />
-        ) : (
-          <WarningOctagon size={14} weight="fill" />
-        )}
-        <span>{isDone ? '连接成功 - 请重启机器人' : '未连接 - 需要获取连接凭证才能读取消息'}</span>
+        <WarningOctagon size={14} weight="fill" />
+        <span>连接凭证失效</span>
       </div>
 
-      {phase !== 'idle' && phase !== 'done' && phase !== 'timeout' && phase !== 'error' && phaseMeta && (
-        <motion.div initial={{opacity:0}} animate={{opacity:1}}
-          className="flex items-center gap-3 p-3.5 rounded-lg border border-status-info/20 bg-status-info-soft">
-          <Spinner size={18} weight="bold" className="animate-spin text-status-info" />
-          <div>
-            <p className="text-[13px] font-semibold text-status-info">{phaseMeta.label}</p>
-            <p className="text-xs text-status-info/80 mt-0.5 font-medium">{msg}</p>
-          </div>
-        </motion.div>
-      )}
+      <p className="text-xs leading-5 font-medium text-status-error/85">
+        需要重新获取凭证才能读取消息。一个程序文件夹只能对应一个微信账号。如果你换过微信号，
+        需要将程序放到新文件夹下启动，否则两个账号的聊天记录会串在一起。
+      </p>
 
-      {phase === 'done' && result && (
-        <motion.div initial={{opacity:0,y:-4}} animate={{opacity:1,y:0}} className="grid grid-cols-2 gap-3">
-          <div className="bg-bg-raised border border-border-main rounded-lg p-3.5">
-            <p className="text-xs text-text-muted mb-1 font-medium">微信账号</p>
-            <p className="text-sm font-mono text-text-main font-bold truncate">{result.wxid || '-'}</p>
-          </div>
-          <div className="bg-bg-raised border border-border-main rounded-lg p-3.5">
-            <p className="text-xs text-text-muted mb-1 font-medium">数据配置</p>
-            <p className="text-xs font-mono text-text-main font-semibold truncate">{result.db_path ? result.db_path.split('\\').slice(-2).join('\\') : '-'}</p>
-          </div>
-        </motion.div>
-      )}
-
-      {(phase === 'error' || phase === 'timeout') && (
-        <motion.div initial={{opacity:0,y:-4}} animate={{opacity:1,y:0}}
-          className="flex items-start gap-2.5 p-3.5 bg-status-warn-soft border border-status-warn/20 rounded-lg">
-          <XCircle size={18} weight="fill" className="text-status-warn shrink-0 mt-0.5" />
-          <div>
-            <p className="text-[13px] text-status-warn font-semibold">{phase === 'timeout' ? '获取超时' : '提取失败'}</p>
-            <p className="text-xs text-status-warn/85 mt-0.5 font-medium">{msg}</p>
-          </div>
-        </motion.div>
-      )}
-
-      {phase !== 'done' && (
-        <motion.button
-          whileTap={{ scale: 0.96 }} whileHover={{ scale: 1.02 }}
-          onClick={handleExtract}
-          disabled={busy}
-          className="flex items-center justify-center gap-2 w-44 py-2.5 rounded-lg text-[13px] font-semibold transition-all duration-200 disabled:opacity-50 cursor-pointer bg-status-error hover:opacity-90 text-white"
-        >
-          {busy ? (
-            <><Spinner size={13} weight="bold" className="animate-spin" /> 连接中...</>
-          ) : phase === 'timeout' || phase === 'error' ? (
-            <><Key size={13} weight="fill" /> 重试</>
-          ) : (
-            <><Key size={13} weight="fill" /> 重新连接</>
-          )}
-        </motion.button>
-      )}
+      <motion.button
+        whileTap={{ scale: 0.96 }} whileHover={{ scale: 1.02 }}
+        onClick={handleReconfigure}
+        disabled={busy}
+        className="flex items-center justify-center gap-2 w-44 py-2.5 rounded-lg text-[13px] font-semibold transition-all duration-200 disabled:opacity-50 cursor-pointer bg-status-error hover:opacity-90 text-white"
+      >
+        {busy ? (
+          <><Spinner size={13} weight="bold" className="animate-spin" /> 正在进入配置...</>
+        ) : (
+          <><Key size={13} weight="fill" /> 重新连接</>
+        )}
+      </motion.button>
     </motion.div>
   )
 }

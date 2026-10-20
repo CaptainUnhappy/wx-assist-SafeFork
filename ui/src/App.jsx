@@ -301,7 +301,13 @@ export default function App() {
 
   // Onboarding
   if (!onboardingDone) {
-    return <Onboarding onComplete={() => { setShowGuide(true); setOnboardingDone(true) }} />
+    return <Onboarding onComplete={() => {
+      setShowGuide(true)
+      setOnboardingDone(true)
+      // 引导完成后立刻拉起 Bot：服务端已在 step4 重建共享客户端，
+      // 新凭证/新目录可以直接生效，不需要重启应用。
+      fetch(`${API_BASE}/api/start`, { method: 'POST' }).catch(() => {})
+    }} />
   }
 
   return (

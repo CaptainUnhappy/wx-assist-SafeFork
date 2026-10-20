@@ -1146,7 +1146,7 @@ class OnboardingApiTests(unittest.TestCase):
 
     def test_onboarding_status_returns_steps(self):
         """GET /api/onboarding/status returns step completion info."""
-        with patch("src.config.is_onboarding_done", return_value=False):
+        with patch("src.config.is_wechat_ready", return_value=False):
             handler, sock = _build_handler("/api/onboarding/status")
             parts = sock.get_response_text().split("\r\n\r\n", 1)
             body = json.loads(parts[1])
@@ -1157,7 +1157,11 @@ class OnboardingApiTests(unittest.TestCase):
 
     def test_onboarding_status_when_done(self):
         """Returns onboarding_done=True when completed."""
-        with patch("src.config.is_onboarding_done", return_value=True):
+        with (
+            patch("src.config.is_wechat_ready", return_value=True),
+            # 密钥实盘校验依赖本机 .env / 微信目录，测试里固定为有效
+            patch("src.web.server._stored_key_invalid", return_value=False),
+        ):
             handler, sock = _build_handler("/api/onboarding/status")
             parts = sock.get_response_text().split("\r\n\r\n", 1)
             body = json.loads(parts[1])
@@ -1181,7 +1185,9 @@ class OnboardingApiTests(unittest.TestCase):
                 self.assertTrue(body["ok"])
             content = fake_env.read_text(encoding="utf-8")
             self.assertIn("ONBOARDING_DONE=false", content)
-            self.assertIn("WCDB_KEY=", content)
+            # 重新引导不清空已保存的密钥：用户可能只是点错/重提失败，
+            # 保留旧 key 不会让环境更糟；引导第一步成功后会覆盖它。
+            self.assertIn("WCDB_KEY=old", content)
         finally:
             fake_env.unlink(missing_ok=True)
             fake_env.with_suffix(".lock").unlink(missing_ok=True)

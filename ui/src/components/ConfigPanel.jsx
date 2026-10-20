@@ -1077,7 +1077,7 @@ function CredentialsSection({ form, update }) {
       {editing && (
         <div className="mx-4 mt-3 flex items-start gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-600 dark:text-amber-400">
           <Warning size={14} weight="fill" className="shrink-0 mt-0.5" />
-          <span>修改连接凭据可能导致机器人无法启动，请谨慎操作。修改后需重启机器人才能生效。</span>
+          <span>修改连接凭据可能导致机器人无法启动，请谨慎操作。修改后需重启应用才能生效。</span>
         </div>
       )}
 
@@ -1595,7 +1595,7 @@ function DataPathSection({ form, update, detectedDataDir }) {
                   </span>
                 </div>
               ))}
-              <p className="text-xs text-text-muted mt-1">确认无误后点击下方「保存配置」并重启机器人即可生效</p>
+              <p className="text-xs text-text-muted mt-1">确认无误后点击下方「保存配置」并重启应用即可生效</p>
             </div>
           ) : (
             <div className="flex items-center gap-2">
@@ -2821,7 +2821,7 @@ export default function ConfigPanel({ activeSection, onNavigate, updateInfo, onC
             className="mb-4 flex items-center gap-2 px-5 py-2.5 bg-brand-green-light border border-brand-green/20 rounded-full text-sm text-brand-green-hover dark:text-brand-green font-medium shadow-sm"
           >
             <CheckCircle size={18} weight="fill" className="text-brand-green-hover dark:text-brand-green" />
-            <span>配置已保存。需要重启机器人才能生效。</span>
+            <span>配置已保存。需要重启应用才能生效。</span>
           </motion.div>
         )}
         {saveError && (
