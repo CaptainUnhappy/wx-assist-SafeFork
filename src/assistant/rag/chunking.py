@@ -4,6 +4,8 @@
 将连续多条消息拼接成一段完整对话后再编码。
 """
 
+import hashlib
+import json
 import logging
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -11,6 +13,11 @@ from typing import Optional
 from .models import Chunk, ChunkConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _message_key(message: dict) -> str:
+    """Stable identity for one message: rowid when present, else message_id."""
+    return str(message.get("id") or message.get("message_id") or "0")
 
 
 class ChunkingStrategy(ABC):
@@ -87,11 +94,21 @@ class SlidingWindowChunker(ChunkingStrategy):
         ]
         content = "\n".join(lines)
         last = group[-1]
+        # Object addresses change across retries/restarts. Stable IDs let an
+        # interrupted batch be upserted without accumulating duplicate vectors.
+        # Live messages carry message_id but no rowid, so both must be used;
+        # otherwise every window in one chat collapses into a single id.
+        identity = json.dumps(
+            [source, str(last.get("chat_id", "")),
+             [_message_key(m) for m in group]],
+            ensure_ascii=False,
+        )
+        chunk_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
         return Chunk(
-            id=f"{source}_{last.get('id', '0')}_{id(group)}",
+            id=f"{source}_{chunk_id}",
             source=source,
-            source_id=str(last.get('id', '0')),
+            source_id=_message_key(last),
             chat_id=str(last.get('chat_id', '')),
             sender_name=last.get('sender_name', ''),
             content=content,

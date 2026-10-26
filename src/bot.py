@@ -621,7 +621,9 @@ class Bot:
                     SlidingWindowChunker = _rag_mod.SlidingWindowChunker
 
                     embedder = FastEmbedder()
-                    vec_store = ChromaStore(path="data/chroma")
+                    # Opening a large persisted index can take minutes on a slow
+                    # disk; only startup gets the larger budget.
+                    vec_store = ChromaStore(path="data/chroma", startup_timeout=180)
                     chunker = SlidingWindowChunker()
                     rag_engine = RAGEngine(store=vec_store, embedder=embedder, chunker=chunker)
                     rag_engine.warmup()
