@@ -271,7 +271,8 @@ class RAGEngine:
 
     # ── 冷启动 ────────────────────────────────────────────────────
 
-    def cold_start(self, db_conn, tracked_groups: Optional[list[str]] = None):
+    def cold_start(self, db_conn, tracked_groups: Optional[list[str]] = None,
+                   days: Optional[int] = None):
         """后台线程：批量索引已有历史消息。
 
         直接使用 SQLite 连接查询，不依赖 MessageStore 的 API。
@@ -305,7 +306,8 @@ class RAGEngine:
                 return True
 
             # created_at 是 UNIX 时间戳（秒）
-            cutoff_ts = int((datetime.now() - timedelta(days=COLD_START_DAYS)).timestamp())
+            window_days = int(days) if days else COLD_START_DAYS
+            cutoff_ts = int((datetime.now() - timedelta(days=window_days)).timestamp())
             batch_size = COLD_START_BATCH
             total = 0
             cursor = db_conn.cursor()
