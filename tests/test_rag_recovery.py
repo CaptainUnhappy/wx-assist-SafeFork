@@ -219,6 +219,9 @@ def test_cold_start_reports_progress_to_status(tmp_path):
 
 
 def test_cache_failure_keeps_cursor_and_retries_successfully(tmp_path, monkeypatch):
+    from src.assistant import rag_status
+
+    rag_status.reset(phase="indexing")
     monkeypatch.chdir(tmp_path)
     cache = ContentCache(str(tmp_path / "messages.db"))
     cache.query = Mock(return_value=[{
@@ -229,9 +232,15 @@ def test_cache_failure_keeps_cursor_and_retries_successfully(tmp_path, monkeypat
     rag._store.add.side_effect = RuntimeError("write failed")
     cache.index_to_rag(rag, "sns")
     assert cache._last_indexed_at["sns"] == 0
+    snap = rag_status.snapshot()
+    assert snap["jobs"]["sns"]["state"] == "error"
+
     rag._store.add.side_effect = None
     cache.index_to_rag(rag, "sns")
     assert cache._last_indexed_at["sns"] == 100
+    snap = rag_status.snapshot()
+    assert snap["jobs"]["sns"]["completed"] == 1
+    assert snap["jobs"]["sns"]["state"] == "done"
 
 
 def test_chunk_identity_is_stable_across_retries_and_separates_chats():

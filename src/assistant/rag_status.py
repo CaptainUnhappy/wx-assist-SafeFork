@@ -31,6 +31,7 @@ _STATE = {
     "device": "cpu",
     "batch_size": 0,
     "started_at": 0.0,
+    "finished_at": 0.0,
     "jobs": {key: _blank_job(label) for key, label in _JOB_LABELS.items()},
 }
 
@@ -43,6 +44,7 @@ def reset(phase: str = "disabled", device: str = "cpu", batch_size: int = 0) -> 
         _STATE["device"] = device
         _STATE["batch_size"] = int(batch_size or 0)
         _STATE["started_at"] = time.time() if phase not in ("disabled",) else 0.0
+        _STATE["finished_at"] = 0.0
         _STATE["jobs"] = {key: _blank_job(label) for key, label in _JOB_LABELS.items()}
 
 
@@ -51,6 +53,10 @@ def update(phase: str = None, error: str = None,
     with _LOCK:
         if phase is not None:
             _STATE["phase"] = phase
+            if phase in ("ready", "error"):
+                _STATE["finished_at"] = _STATE["finished_at"] or time.time()
+            elif phase in ("loading", "preparing", "indexing"):
+                _STATE["finished_at"] = 0.0
         if error is not None:
             _STATE["error"] = error
         if device is not None:
@@ -83,8 +89,10 @@ def job(key: str, label: str = None, total: int = None, completed: int = None,
 def snapshot() -> dict:
     with _LOCK:
         data = copy.deepcopy(_STATE)
-    data["elapsed"] = round(time.time() - data["started_at"], 1) if data["started_at"] else 0.0
+    end = data["finished_at"] or time.time()
+    data["elapsed"] = round(end - data["started_at"], 1) if data["started_at"] else 0.0
     for item in data["jobs"].values():
         total = item["total"]
-        item["percent"] = round(item["completed"] * 100.0 / total, 1) if total else 0.0
+        percent = item["completed"] * 100.0 / total if total else 0.0
+        item["percent"] = round(min(100.0, max(0.0, percent)), 1)
     return data

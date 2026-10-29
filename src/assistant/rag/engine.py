@@ -315,10 +315,24 @@ class RAGEngine:
             already_done = 0
             if rag_status:
                 try:
-                    expected_total = int(db_conn.execute(
-                        "SELECT COUNT(*) FROM messages WHERE created_at >= ?", (cutoff_ts,)
-                    ).fetchone()[0])
+                    if tracked_groups is None:
+                        expected_total = int(db_conn.execute(
+                            "SELECT COUNT(*) FROM messages WHERE created_at >= ?", (cutoff_ts,)
+                        ).fetchone()[0])
+                    else:
+                        wanted = list(groups)
+                        for start in range(0, len(wanted), 400):
+                            part = wanted[start:start + 400]
+                            placeholders = ",".join("?" * len(part))
+                            expected_total += int(db_conn.execute(
+                                f"SELECT COUNT(*) FROM messages WHERE created_at >= ? "
+                                f"AND chat_id IN ({placeholders})",
+                                [cutoff_ts, *part],
+                            ).fetchone()[0])
+                    wanted_set = set(groups)
                     for _chat, _last in self._last_indexed_ids.items():
+                        if _chat not in wanted_set:
+                            continue
                         already_done += int(db_conn.execute(
                             "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND rowid <= ? AND created_at >= ?",
                             (_chat, _last, cutoff_ts),

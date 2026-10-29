@@ -1,5 +1,7 @@
 """RAG 进度快照的单元测试。"""
 
+import time
+
 from src.assistant import rag_status
 
 
@@ -38,6 +40,17 @@ def test_snapshot_is_isolated_from_internal_state():
     fresh = rag_status.snapshot()
     assert fresh["jobs"]["oa"]["completed"] == 3
     assert fresh["phase"] == "indexing"
+
+
+def test_percent_is_clamped_and_timer_freezes_when_done():
+    rag_status.reset(phase="indexing")
+    rag_status.job("msg", total=10, completed=25)
+    assert rag_status.snapshot()["jobs"]["msg"]["percent"] == 100.0
+
+    rag_status.update(phase="ready")
+    first = rag_status.snapshot()["elapsed"]
+    time.sleep(1.1)
+    assert rag_status.snapshot()["elapsed"] == first
 
 
 def test_disabled_reset_clears_jobs_and_timer():
