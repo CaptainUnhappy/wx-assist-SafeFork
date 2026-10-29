@@ -15,6 +15,7 @@
 - [关键词提醒](modules/keyword-alert.md)
 - [消息推送](modules/ilink-push.md)
 - [MCP 扩展](modules/mcp-client.md)
+- [本地语义检索维护](modules/rag-maintenance.md)
 - [Skill 体系](modules/skill.md)
 
 ## 产品定位
