@@ -667,6 +667,32 @@ class ToolExecutor:
 
     # ── get_status ─────────────────────────────────────────────────
 
+    # 推送通道展示：按 IM 通道逐个列出，避免把 iLink 状态说成"微信在线"误导模型
+    _IM_CHANNEL_LABELS = {"ilink": "iLink", "qqbot": "QQ", "feishu": "飞书"}
+    _IM_STATE_TEXT = {
+        "ok": "✅ 已连接",
+        "pending": "⏳ 连接中",
+        "unconfigured": "⚪ 未配置",
+        "error": "❌ 推送异常",
+    }
+
+    def _format_push_channels(self, channels) -> str:
+        """把 im_channels 快照渲染成一行文字。结构见 web/server.py:_im_channel_snapshot。"""
+        if not isinstance(channels, dict) or not channels:
+            return "推送通道: 未知"
+        parts = []
+        for name in ("ilink", "qqbot", "feishu"):
+            item = channels.get(name)
+            if not isinstance(item, dict):
+                continue
+            label = self._IM_CHANNEL_LABELS.get(name, name)
+            state = item.get("state") or ("ok" if item.get("ok") else "error")
+            text = self._IM_STATE_TEXT.get(state, str(state))
+            if state == "error" and item.get("error"):
+                text = f"❌ {str(item['error'])[:60]}"
+            parts.append(f"{label} {text}")
+        return "推送通道: " + ("；".join(parts) if parts else "未知")
+
     def _handle_get_status(self) -> str:
         if self._status_fn is None:
             return "无法获取状态信息（未注入状态函数）"
@@ -683,7 +709,7 @@ class ToolExecutor:
             f"已处理消息: {s.get('messages_processed', 0):,} 条\n"
             f"群聊数: {s.get('group_count', 0)} 个\n"
             f"数据库: {'✅' if s.get('db_ok') else '❌'}\n"
-            f"微信在线: {'✅' if s.get('wechat_online') else '❌'}\n"
+            f"{self._format_push_channels(s.get('im_channels'))}\n"
             f"AI 连通: {'✅' if s.get('ai_ok') else '❌'}\n"
             f"模型: {s.get('model_name', '未配置') or '未配置'}"
         )
