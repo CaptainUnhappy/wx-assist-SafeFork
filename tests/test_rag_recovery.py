@@ -193,6 +193,31 @@ def test_failed_cold_start_does_not_checkpoint(tmp_path):
     connection.close()
 
 
+def test_cold_start_reports_progress_to_status(tmp_path):
+    from src.assistant import rag_status
+
+    rag_status.reset(phase="preparing")
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("CREATE TABLE messages(chat_id, sender_name, content, created_at)")
+    connection.executemany("INSERT INTO messages VALUES (?, ?, ?, ?)", [
+        ("chat", "sender", "message", int(time.time())) for _ in range(3)
+    ])
+    store = Mock()
+    embedder = Mock()
+    embedder.encode.side_effect = lambda texts: np.ones((len(texts), 2))
+    engine = RAGEngine(store, embedder)
+    engine._state_path = tmp_path / "state.json"
+
+    assert engine.cold_start(connection) is True
+    snap = rag_status.snapshot()
+    assert snap["phase"] == "ready"
+    assert snap["jobs"]["msg"]["total"] == 3
+    assert snap["jobs"]["msg"]["completed"] == 3
+    assert snap["jobs"]["msg"]["percent"] == 100.0
+    connection.close()
+
+
 def test_cache_failure_keeps_cursor_and_retries_successfully(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cache = ContentCache(str(tmp_path / "messages.db"))

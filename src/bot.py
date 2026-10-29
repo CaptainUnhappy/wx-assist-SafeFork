@@ -604,6 +604,11 @@ class Bot:
             rag_engine = None
             if not asst_cfg.rag_enabled:
                 logger.info("[RAG] 已通过配置禁用，跳过 RAG 初始化")
+                try:
+                    from src.assistant import rag_status
+                    rag_status.reset(phase="disabled")
+                except Exception:
+                    pass
                 router.set_rag(None)
                 tool_executor.set_rag(None)
                 try:
@@ -621,12 +626,23 @@ class Bot:
                     SlidingWindowChunker = _rag_mod.SlidingWindowChunker
 
                     embedder = FastEmbedder()
+                    try:
+                        from src.assistant import rag_status
+                        rag_status.reset(phase="loading", device="cpu",
+                                         batch_size=getattr(embedder, "_batch_size", 0))
+                    except Exception:
+                        pass
                     # Opening a large persisted index can take minutes on a slow
                     # disk; only startup gets the larger budget.
                     vec_store = ChromaStore(path="data/chroma", startup_timeout=180)
                     chunker = SlidingWindowChunker()
                     rag_engine = RAGEngine(store=vec_store, embedder=embedder, chunker=chunker)
                     rag_engine.warmup()
+                    try:
+                        from src.assistant import rag_status
+                        rag_status.update(phase="preparing")
+                    except Exception:
+                        pass
 
                     # Inject into Router（用于实时索引）和 ToolExecutor（用于搜索工具）
                     router.set_rag(rag_engine)
@@ -657,6 +673,11 @@ class Bot:
                 except Exception as rag_e:
                     logger.warning("[RAG] RAGEngine init failed (continuing without): %s", rag_e)
                     rag_engine = None
+                    try:
+                        from src.assistant import rag_status
+                        rag_status.reset(phase="error", error=str(rag_e))
+                    except Exception:
+                        pass
                     router.set_rag(None)
                     tool_executor.set_rag(None)
                     try:
