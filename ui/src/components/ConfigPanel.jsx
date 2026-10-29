@@ -6,6 +6,7 @@ import { spring, Field, Toggle, Select, Input, API_BASE, getWsUrl } from './Shar
 import ChatDrawer from './ChatDrawer'
 import PlatformConfigDemo from './PlatformConfigDemo'
 import VoiceSection from './VoiceSection'
+import RagStatus from './RagStatus'
 
 const pageTransition = {
   initial: { opacity: 0, x: 12 },
@@ -423,6 +424,7 @@ function RagToggleRow({ form, update }) {
         </div>
         <Toggle enabled={Boolean(form.rag_enabled)} onChange={v => update('rag_enabled', v)} />
       </div>
+      <RagStatus enabled={Boolean(form.rag_enabled)} />
     </div>
   )
 }

@@ -592,4 +592,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # PyInstaller worker processes must enter multiprocessing before starting UI.
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()

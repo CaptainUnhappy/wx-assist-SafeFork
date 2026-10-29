@@ -28,6 +28,11 @@ from src.utils.llm_logger import log_llm_interaction
 
 logger = logging.getLogger(__name__)
 
+# 公众号摘要的 LLM 超时。摘要耗时由输出长度决定（约 18s 固定开销 + 每字 14ms），
+# 60s 对长摘要不够用；与群聊摘要的 DIGEST_LLM_TIMEOUT_SEC 分开配置。
+# 外层线程等待在此基础上留 20s 余量。
+OA_DIGEST_LLM_TIMEOUT_SEC = float(os.getenv("OA_DIGEST_LLM_TIMEOUT_SEC", "180"))
+
 # ── Digest Prompt Templates ───────────────────────────────────────────
 
 DIGEST_TEMPLATES = {
@@ -161,6 +166,7 @@ def call_llm(prompt: str, system_prompt: str = "", summarizer=None) -> str:
                 [{"role": "user", "content": prompt}],
                 max_tokens=4096,
                 temperature=0.3,
+                timeout=OA_DIGEST_LLM_TIMEOUT_SEC,
             )
             latency = (time.monotonic() - start) * 1000
             log_llm_interaction(
@@ -221,7 +227,8 @@ def call_llm(prompt: str, system_prompt: str = "", summarizer=None) -> str:
 
     try:
         start = time.monotonic()
-        resp = requests.post(url, json=payload, headers=headers, timeout=60)
+        resp = requests.post(url, json=payload, headers=headers,
+                             timeout=OA_DIGEST_LLM_TIMEOUT_SEC)
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
@@ -430,7 +437,8 @@ class OADigestService:
                 len(new_articles), len(full_prompt),
                 "custom_prompt" if group.custom_prompt else (group.digest_template or "default"),
             )
-            # Wrap with 90s Python timeout (httpx 60s + 30s buffer for long summaries)
+            # 外层线程等待：内层 HTTP 超时 + 20s 余量
+            _outer_timeout = OA_DIGEST_LLM_TIMEOUT_SEC + 20
             import concurrent.futures
             try:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _exe:
@@ -438,11 +446,11 @@ class OADigestService:
                         call_llm, full_prompt, system_prompt, summarizer=self._summarizer,
                     )
                     try:
-                        digest_text = _fut.result(timeout=90)
+                        digest_text = _fut.result(timeout=_outer_timeout)
                     except concurrent.futures.TimeoutError:
                         logger.warning(
-                            "[OA-DIGEST] Direct LLM 超时（90s），文章数=%d, prompt=%d chars",
-                            len(new_articles), len(full_prompt),
+                            "[OA-DIGEST] Direct LLM 超时（%.0fs），文章数=%d, prompt=%d chars",
+                            _outer_timeout, len(new_articles), len(full_prompt),
                         )
                         digest_text = ""
             except Exception as e:
@@ -567,6 +575,7 @@ class OADigestService:
 
         # Map phase — parallel LLM calls
         chunk_summaries = {}
+        _outer_timeout = OA_DIGEST_LLM_TIMEOUT_SEC + 20
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             future_to_idx = {}
             for idx, chunk in enumerate(chunks):
@@ -577,10 +586,10 @@ class OADigestService:
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    chunk_summaries[idx] = future.result(timeout=90)
+                    chunk_summaries[idx] = future.result(timeout=_outer_timeout)
                     logger.debug("[OA-DIGEST] Map chunk %d/%d completed", idx + 1, len(chunks))
                 except concurrent.futures.TimeoutError:
-                    logger.error("[OA-DIGEST] Map chunk %d 超时（70s）", idx)
+                    logger.error("[OA-DIGEST] Map chunk %d 超时（%.0fs）", idx, _outer_timeout)
                     chunk_summaries[idx] = ""
                 except Exception as e:
                     logger.error("[OA-DIGEST] Map chunk %d failed: %s", idx, e)

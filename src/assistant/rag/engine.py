@@ -24,6 +24,11 @@ from .models import Chunk, ChunkConfig, SearchResult
 from .reranker import NoopReranker, Reranker
 from .vector_store import VectorStore
 
+try:
+    from .. import rag_status
+except Exception:  # pragma: no cover - 状态模块缺失不应影响索引
+    rag_status = None
+
 logger = logging.getLogger(__name__)
 
 # 默认值
@@ -155,6 +160,8 @@ class RAGEngine:
             self._store.add(chunks, embeddings)
         except Exception as e:
             logger.warning("[RAG] ingest 批量索引失败: %s", e)
+            # cold_start must not checkpoint a batch that was never persisted.
+            raise
 
     def ingest_one(self, msg: dict, source: str = "msg"):
         """增量索引单条消息。
@@ -292,13 +299,49 @@ class RAGEngine:
 
             if not groups:
                 logger.info("[RAG] 冷启动跳过：没有需要索引的群")
-                return
+                if rag_status:
+                    rag_status.job("msg", state="done", total=0, completed=0)
+                    rag_status.update(phase="ready")
+                return True
 
             # created_at 是 UNIX 时间戳（秒）
             cutoff_ts = int((datetime.now() - timedelta(days=COLD_START_DAYS)).timestamp())
             batch_size = COLD_START_BATCH
             total = 0
             cursor = db_conn.cursor()
+
+            # 进度基数：30 天内总消息数 + 已索引数（重启后进度不会从 0 开始）
+            expected_total = 0
+            already_done = 0
+            if rag_status:
+                try:
+                    if tracked_groups is None:
+                        expected_total = int(db_conn.execute(
+                            "SELECT COUNT(*) FROM messages WHERE created_at >= ?", (cutoff_ts,)
+                        ).fetchone()[0])
+                    else:
+                        wanted = list(groups)
+                        for start in range(0, len(wanted), 400):
+                            part = wanted[start:start + 400]
+                            placeholders = ",".join("?" * len(part))
+                            expected_total += int(db_conn.execute(
+                                f"SELECT COUNT(*) FROM messages WHERE created_at >= ? "
+                                f"AND chat_id IN ({placeholders})",
+                                [cutoff_ts, *part],
+                            ).fetchone()[0])
+                    wanted_set = set(groups)
+                    for _chat, _last in self._last_indexed_ids.items():
+                        if _chat not in wanted_set:
+                            continue
+                        already_done += int(db_conn.execute(
+                            "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND rowid <= ? AND created_at >= ?",
+                            (_chat, _last, cutoff_ts),
+                        ).fetchone()[0])
+                    rag_status.job("msg", label="聊天记录", total=expected_total,
+                                   completed=already_done, state="running")
+                    rag_status.update(phase="indexing")
+                except Exception:
+                    pass
 
             for chat_id in groups:
                 last_id = self._last_indexed_ids.get(chat_id, 0)
@@ -320,11 +363,21 @@ class RAGEngine:
                     last_id = messages[-1]["id"]
                     self._last_indexed_ids[chat_id] = last_id
                     self._save_state()
+                    if rag_status:
+                        rag_status.job("msg", completed=already_done + total)
 
             logger.info("[RAG] 冷启动完成: 共索引 %d 条消息", total)
+            if rag_status:
+                rag_status.job("msg", state="done", completed=already_done + total)
+                rag_status.update(phase="ready")
+            return True
 
         except Exception as e:
             logger.warning("[RAG] 冷启动失败: %s", e)
+            if rag_status:
+                rag_status.job("msg", state="error")
+                rag_status.update(phase="error", error=f"冷启动失败：{e}")
+            return False
 
     # 状态持久化 — 前面已有
 

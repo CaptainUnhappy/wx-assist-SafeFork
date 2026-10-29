@@ -2127,6 +2127,12 @@ class _UIHandler(SimpleHTTPRequestHandler):
             return
 
         # ── API: Load config ───────────────────────────────────────────
+        # ── API: RAG progress ─────────────────────────────────────────
+        if self.path == "/api/rag/status" and self.command == "GET":
+            from src.assistant import rag_status
+            self.send_json({"ok": True, **rag_status.snapshot()})
+            return
+
         if self.path == "/api/load-config":
             env_path = _find_or_create_env()
             raw = {}
