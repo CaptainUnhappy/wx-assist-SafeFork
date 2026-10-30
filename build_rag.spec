@@ -118,6 +118,7 @@ a = Analysis(
         'src.assistant.oa_digest', 'src.assistant.oa_groups',
         'src.assistant.oa_parser', 'src.assistant.oa_reader',
         'src.assistant.task_center',
+        'src.rag_reset', 'src.assistant.rag_status',
         'src.assistant.rag', 'src.assistant.rag.engine',
         'src.assistant.rag.embedder', 'src.assistant.rag.vector_store',
         'src.assistant.rag.chunking', 'src.assistant.rag.models',

@@ -284,7 +284,7 @@ def main(argv=None) -> int:
         _log(f"[失败] {exc}")
         return 1
     _log(json.dumps(result, ensure_ascii=False))
-    _log("旧索引保留在 *.previous-*；确认无误后可手动删除。")
+    _log("校验通过，旧索引已删除；聊天记录未改动。")
     return 0
 
 

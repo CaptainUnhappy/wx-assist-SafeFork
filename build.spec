@@ -116,6 +116,7 @@ a = Analysis(
         'src.assistant.oa_digest', 'src.assistant.oa_groups',
         'src.assistant.oa_parser', 'src.assistant.oa_reader',
         'src.assistant.task_center',
+        'src.rag_reset', 'src.assistant.rag_status',
         'src.agent', 'src.agent.engine', 'src.agent.tools',
         'src.agent.registry', 'src.agent.mcp_server',
         'src.summarize', 'src.summarize.base', 'src.summarize.claude_backend',
