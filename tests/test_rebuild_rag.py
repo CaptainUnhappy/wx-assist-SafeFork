@@ -45,8 +45,9 @@ def test_rebuild_replaces_index_and_keeps_previous(tmp_path):
     assert result["ok"] is True
     assert result["chunks"] >= 1
     assert (data / "chroma").exists()
-    previous = list(data.glob("chroma.previous-*"))
-    assert previous and (previous[0] / "old.txt").read_text(encoding="utf-8") == "old-index"
+    # 校验通过后旧索引被删除，不再长期占用空间。
+    assert not list(data.glob("chroma.previous-*"))
+    assert result["previous"] == {}
     assert json.loads((data / "rag_rebuild.json").read_text(encoding="utf-8"))["state"] == "done"
 
 

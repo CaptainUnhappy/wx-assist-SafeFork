@@ -560,12 +560,19 @@ export default function Dashboard({ status, onTabChange }) {
             // - RAG initialized successfully (rag_ok=true) → 已就绪
             // - everything else (switch off, init failure) → 已关闭
             const ragAvailable = status.rag_available !== false
+            const ragPhase = status.rag_phase || ''
             const ragState = !ragAvailable
               ? { ok: false, text: '未安装', detail: '当前版本未包含 RAG' }
-              : status.rag_ok
-                ? { ok: true, text: '已就绪', detail: '支持聊天/公众号/朋友圈语义检索' }
-                : { ok: false, text: '已关闭', detail: '请在系统配置中启动' }
-            return <StatusTile icon={Cube} label="语义搜索" ok={ragState.ok} okText="已就绪" errText={ragState.text} detail={ragState.detail} />
+              : ragPhase === 'error'
+                ? { ok: false, text: '异常', detail: status.rag_error || '请在系统配置中重置索引' }
+                : ragPhase === 'indexing'
+                  ? { ok: true, text: '索引中', detail: `已建立 ${status.rag_progress || 0}%` }
+                  : (ragPhase === 'loading' || ragPhase === 'preparing')
+                    ? { ok: true, text: '启动中', detail: '正在加载本地索引' }
+                    : status.rag_ok
+                      ? { ok: true, text: '已就绪', detail: '支持聊天/公众号/朋友圈语义检索' }
+                      : { ok: false, text: '已关闭', detail: '请在系统配置中启动' }
+            return <StatusTile icon={Cube} label="语义搜索" ok={ragState.ok} okText={ragState.text} errText={ragState.text} detail={ragState.detail} />
           })()}
           <StatusTile icon={Robot} label="助手服务" ok={status.running} okText="运行" errText="停止"
             detail={status.running ? `已运行 ${uptimeStr}` : ''} />

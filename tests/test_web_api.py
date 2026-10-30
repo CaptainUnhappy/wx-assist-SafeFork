@@ -385,6 +385,8 @@ class ServerStatusTests(unittest.TestCase):
             "timestamp", "error", "avatar_url", "wx_name",
             "restricted_features_enabled",
             "mcp_servers", "rag_available", "rag_enabled", "rag_ok", "im_channels",
+            # RAG 实时状态：首页卡片显示 就绪/索引中/异常
+            "rag_phase", "rag_error", "rag_progress", "rag_reset_pending",
             # 版本信息：供界面展示，并决定检查更新时下载哪个变体的安装包
             "version", "build_variant", "is_frozen",
         }

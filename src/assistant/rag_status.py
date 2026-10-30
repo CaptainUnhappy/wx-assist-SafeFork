@@ -36,15 +36,16 @@ _STATE = {
 }
 
 
-def reset(phase: str = "disabled", device: str = "cpu", batch_size: int = 0) -> None:
-    """重置整个状态（启动/关闭 RAG 时调用）。"""
+def reset(phase: str = "disabled", device: str = "cpu", batch_size: int = 0,
+          error: str = "") -> None:
+    """重置整个状态（启动/关闭/异常时调用）。"""
     with _LOCK:
         _STATE["phase"] = phase
-        _STATE["error"] = ""
+        _STATE["error"] = error
         _STATE["device"] = device
         _STATE["batch_size"] = int(batch_size or 0)
         _STATE["started_at"] = time.time() if phase not in ("disabled",) else 0.0
-        _STATE["finished_at"] = 0.0
+        _STATE["finished_at"] = time.time() if phase in ("ready", "error") else 0.0
         _STATE["jobs"] = {key: _blank_job(label) for key, label in _JOB_LABELS.items()}
 
 

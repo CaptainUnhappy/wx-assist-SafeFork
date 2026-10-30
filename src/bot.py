@@ -625,6 +625,15 @@ class Bot:
                     ChromaStore = _rag_mod.ChromaStore
                     SlidingWindowChunker = _rag_mod.SlidingWindowChunker
 
+                    # 用户在设置页点过「重置索引」时，先改名旧索引再重建。
+                    try:
+                        from src.rag_reset import perform_pending_reset
+                        reset_info = perform_pending_reset("data")
+                        if reset_info:
+                            logger.warning("[RAG] 按用户请求重置索引: %s", reset_info)
+                    except Exception as reset_err:
+                        logger.warning("[RAG] 重置索引失败（继续使用原索引）: %s", reset_err)
+
                     embedder = FastEmbedder()
                     try:
                         from src.assistant import rag_status
@@ -661,7 +670,16 @@ class Bot:
                     def _cold_start_task():
                         try:
                             db_conn = self._conn
-                            rag_engine.cold_start(db_conn, tracked_groups=None)
+                            ok = rag_engine.cold_start(db_conn, tracked_groups=None)
+                            if ok:
+                                # 重建成功，删除重置时留存的旧索引（派生数据）。
+                                try:
+                                    from src.rag_reset import cleanup_broken
+                                    removed = cleanup_broken("data")
+                                    if removed:
+                                        logger.info("[RAG] 已清理旧索引: %s", removed)
+                                except Exception as clean_err:
+                                    logger.debug("[RAG] 清理旧索引失败: %s", clean_err)
                         except Exception as e:
                             # 冷启动失败 → RAG 搜索静默退化且无任何日志，
                             # 用户会以为"语义检索就是找不到"。必须告警。
@@ -675,7 +693,11 @@ class Bot:
                     rag_engine = None
                     try:
                         from src.assistant import rag_status
-                        rag_status.reset(phase="error", error=str(rag_e))
+                        # 面向用户的提示，不要把原始异常堆栈丢到界面上
+                        rag_status.reset(
+                            phase="error",
+                            error="语义索引暂时不可用，其他功能不受影响。请重启应用；仍不可用请在设置页点「重置索引」。",
+                        )
                     except Exception:
                         pass
                     router.set_rag(None)

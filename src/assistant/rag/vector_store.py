@@ -99,9 +99,18 @@ class ChromaStore(VectorStore):
                 process.close()
 
     def _fail(self, reason):
+        # 让设置页和首页立即显示“异常”，而不是停留在“就绪”。
+        try:
+            from .. import rag_status
+            rag_status.update(
+                phase="error",
+                error="语义索引暂时不可用，其他功能不受影响。请重启应用；仍不可用请在设置页点「重置索引」。",
+            )
+        except Exception:
+            pass
         self._failure = (
             f"RAG 向量索引不可用 ({self._path}): {reason}。"
-            "请先重启应用；仍失败再停止应用重建索引，聊天数据库无需删除。"
+            "请重启应用；仍不可用请在设置页点「重置索引」，聊天数据库无需删除。"
         )
         self._discard_worker()
         raise RuntimeError(self._failure)

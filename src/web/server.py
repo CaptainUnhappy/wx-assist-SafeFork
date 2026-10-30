@@ -684,6 +684,20 @@ class _ServerStatus:
         snapshot["version"] = __version__
         snapshot["build_variant"] = "full" if _resolve_rag_availability() else "lite"
         snapshot["is_frozen"] = bool(getattr(_sys, "frozen", False))
+        # RAG 实时状态：首页「语义搜索」卡片据此显示 就绪/索引中/异常
+        try:
+            from src.assistant import rag_status
+            state = rag_status.snapshot()
+            snapshot["rag_phase"] = state.get("phase", "disabled")
+            snapshot["rag_error"] = state.get("error", "")
+            snapshot["rag_progress"] = (state.get("jobs", {}).get("msg") or {}).get("percent", 0)
+            from src.rag_reset import is_pending
+            snapshot["rag_reset_pending"] = is_pending()
+        except Exception:
+            snapshot["rag_phase"] = "disabled"
+            snapshot["rag_error"] = ""
+            snapshot["rag_progress"] = 0
+            snapshot["rag_reset_pending"] = False
         return snapshot
 
     def add_client(self, sock):
@@ -1486,7 +1500,8 @@ def _is_local_only(path: str) -> bool:
     """
     if path.startswith("/api/app/"):
         return True
-    return path in ("/api/update/download", "/api/update/install", "/api/update/skip")
+    return path in ("/api/update/download", "/api/update/install", "/api/update/skip",
+                    "/api/rag/reset")
 
 
 # ── 桌面窗口控制回调（由 desktop.py 注册）──────────────────────────────
@@ -1598,6 +1613,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/assistant/ai/detect",
                          "/api/assistant/notifications/test",
                          "/api/assistant/notifications/pending",
+                         "/api/rag/reset",
                          "/api/fav/export",
                          "/api/sns/protect/install",
                          "/api/sns/protect/uninstall",
@@ -1805,6 +1821,16 @@ class _UIHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/lan/disable" and self.command == "POST":
             _lan_auth.disable()
             self.send_json({"ok": True})
+            return
+
+        # ── API: Reset RAG index (next start applies it) ───────────────
+        if self.path == "/api/rag/reset" and self.command == "POST":
+            try:
+                from src.rag_reset import request_reset
+                request_reset("data")
+                self.send_json({"ok": True, "need_restart": True})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 500)
             return
 
         # ── API: Start bot ────────────────────────────────────────────
@@ -2130,7 +2156,12 @@ class _UIHandler(SimpleHTTPRequestHandler):
         # ── API: RAG progress ─────────────────────────────────────────
         if self.path == "/api/rag/status" and self.command == "GET":
             from src.assistant import rag_status
-            self.send_json({"ok": True, **rag_status.snapshot()})
+            try:
+                from src.rag_reset import is_pending
+                pending = is_pending()
+            except Exception:
+                pending = False
+            self.send_json({"ok": True, "reset_pending": pending, **rag_status.snapshot()})
             return
 
         if self.path == "/api/load-config":

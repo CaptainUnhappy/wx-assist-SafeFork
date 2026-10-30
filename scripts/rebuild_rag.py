@@ -139,7 +139,18 @@ def _switch(data_dir: Path, staging_data: Path) -> dict:
         raise
 
     _write_journal(data_dir, {"state": "done", "stamp": stamp, "backup": backup})
-    return backup
+
+    # 新索引已校验并切换成功：旧索引是派生数据，直接删除，避免长期占用空间。
+    for previous in backup.values():
+        try:
+            path = Path(previous)
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink()
+        except OSError:
+            pass
+    return {}
 
 
 def rebuild(data_dir: Path, days: int = 30, skip_cache: bool = False,
