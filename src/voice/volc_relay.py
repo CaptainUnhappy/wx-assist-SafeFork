@@ -39,6 +39,9 @@ FRAME_BYTES = 640
 FRAME_INTERVAL = 0.02
 SILENCE_FRAME = b"\x00" * FRAME_BYTES
 
+# 工具执行超时：超过就放弃等待并回一句超时提示，避免整通电话卡在"思考中"
+TOOL_TIMEOUT_SEC = 20
+
 # 火山主打音色（S2S 全双工保证效果的 4 个 2.0 音色 + 常用款）
 VOLC_VOICES = [
     {"id": "zh_female_vv_uranus_bigtts", "name": "Vivi 2.0 · 女声（默认）"},
@@ -91,6 +94,8 @@ class VolcRelay:
         # 上行音频缓冲（pacer 重切成 20ms 帧）
         self._audio_q: asyncio.Queue = None  # type: ignore
         self._pacer_task = None
+        # 工具结果回传后，等模型开口的计时起点（拿到首个音频分片时打日志）
+        self._await_model_since: float | None = None
 
     # ── 同步生命周期 ─────────────────────────────────────────────────
 
@@ -301,6 +306,12 @@ class VolcRelay:
         if etype == "response.output_audio.delta":
             b64 = evt.get("delta", "")
             if b64:
+                if self._await_model_since is not None:
+                    logger.info(
+                        "[VOICE-VOLC] sid=%s first audio after tool in %.0fms",
+                        self.sid,
+                        (time.monotonic() - self._await_model_since) * 1000)
+                    self._await_model_since = None
                 try:
                     self._browser_send(base64.b64decode(b64))
                 except Exception:
@@ -357,7 +368,8 @@ class VolcRelay:
                            json.dumps(evt.get("error", evt), ensure_ascii=False)[:200])
             return evt
         # 轮次/会话事件原样透传
-        if t in ("response.done", "session.updated",
+        # response.created：模型开始产出，前端据此从"聆听中"切到"思考中"
+        if t in ("response.created", "response.done", "session.updated",
                  "input_audio_buffer.committed"):
             return evt
         return None
@@ -371,33 +383,58 @@ class VolcRelay:
                       if evt.get(k) is not None}
             items = [single] if single.get("call_id") else []
 
+        tool_results: list[dict] = []
         for call in items:
             call_id = call.get("call_id", "")
             name = call.get("name", "")
             arguments = call.get("arguments", "{}") or "{}"
             self._emit({"type": "voice.tool_start", "name": name})
-            logger.info("[VOICE-VOLC] sid=%s function_call %s(%s)",
+            logger.info("[VOICE-VOLC] sid=%s tool START name=%s args=%s",
                         self.sid, name, arguments[:200])
             tool_t0 = time.monotonic()
-            result = await asyncio.to_thread(self._execute_tool, name, arguments)
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(self._execute_tool, name, arguments),
+                    timeout=TOOL_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                result = (f"工具执行超时（超过 {TOOL_TIMEOUT_SEC} 秒），"
+                          f"请换个说法或稍后再试。")
+                logger.warning("[VOICE-VOLC] sid=%s tool TIMEOUT name=%s after %.0fs",
+                               self.sid, name, TOOL_TIMEOUT_SEC)
+            except Exception as e:                       # noqa: BLE001
+                result = f"工具执行出错: {e}"
+                logger.warning("[VOICE-VOLC] sid=%s tool ERROR name=%s: %s",
+                               self.sid, name, e)
             tool_ms = (time.monotonic() - tool_t0) * 1000
             result = result or "（工具返回为空）"
             if len(result) > 6000:
                 result = result[:6000] + "\n…（内容过长已截断）"
+            logger.info("[VOICE-VOLC] sid=%s tool DONE name=%s %.0fms result_len=%d",
+                        self.sid, name, tool_ms, len(result))
             self._call.log_tool(name, arguments, result, tool_ms)
             self._emit({"type": "voice.tool_done", "name": name,
                         "preview": result[:160]})
 
-            # 火山工具结果：role=tool + content 数组，按 call_id 配对
-            await self._ws_send({
-                "type": "conversation.item.create",
-                "item": {
-                    "call_id": call_id,
-                    "role": "tool",
-                    "content": [{"type": "text", "text": result}],
-                },
+            # 火山工具结果项：role=tool + content 数组，按 call_id 配对。
+            # content.type 必须是 input_text（不是 text）。
+            tool_results.append({
+                "call_id": call_id,
+                "role": "tool",
+                "content": [{"type": "input_text", "text": result}],
             })
-        # 火山收到全部工具结果后自动续讲，无需再发 response.create。
+
+        # 火山协议要求把所有函数结果聚合到同一个事件里、放进 items 数组
+        # （并行调用要一次性回传，全部回传完模型才继续生成）。
+        await self._ws_send({
+            "type": "conversation.item.create",
+            "items": tool_results,
+        })
+        # 火山收到工具结果后由服务端自动续答；不需要（也不支持）response.create。
+        # 从这里开始等模型开口（拿到首个音频分片时会计时打日志）
+        self._await_model_since = time.monotonic()
+        logger.info("[VOICE-VOLC] sid=%s tool results sent items=%d, waiting for model audio",
+                    self.sid, len(tool_results))
 
     def _execute_tool(self, name: str, arguments: str) -> str:
         if self._registry is None:

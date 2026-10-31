@@ -35,6 +35,8 @@ export class RealtimeSession {
     this._nextStartTime = 0
     this._curSource = null
     this._toolRunning = false
+    this._toolWatchdog = null
+    this._turnWatchdog = null
   }
 
   async start(wsUrl) {
@@ -202,8 +204,15 @@ export class RealtimeSession {
         break
       case 'input_audio_buffer.speech_started':
         // 用户开口（可能在打断 AI）：立即停止当前播放 + 清空待播音频
+        this._clearTurnWatchdog()
+        this._clearToolWatchdog()
         this._clearPlayback()
         this.onState('listening')
+        break
+      case 'input_audio_buffer.committed':
+        // 服务端判定用户这句话说完了 → 已经进入"思考/生成"阶段
+        this.onState('thinking')
+        this._startTurnWatchdog()
         break
       case 'conversation.item.input_audio_transcription.completed':
         if (evt.transcript) this.onUserTranscript(evt.transcript)
@@ -215,12 +224,16 @@ export class RealtimeSession {
         if (evt.transcript) this.onAssistantTranscript(evt.transcript, false)
         break
       case 'response.created':
-        // 模型开始产出（可能要先调工具，音频未到前先显示思考态由工具事件控制）
+        // 模型开始产出（可能要先调工具）：先显示思考态
+        this.onState('thinking')
+        this._startTurnWatchdog()
         break
       case 'response.audio.delta':
         // 理论上走二进制帧；服务端若以文本下发则忽略（中继已转二进制）
         break
       case 'voice.tool_start':
+        this._clearTurnWatchdog()
+        this._clearToolWatchdog()
         this._toolRunning = true
         this.onState('thinking')
         this.onTool({ phase: 'start', name: evt.name })
@@ -228,9 +241,22 @@ export class RealtimeSession {
       case 'voice.tool_done':
         this._toolRunning = false
         this.onTool({ phase: 'done', name: evt.name, preview: evt.preview })
+        // 工具已返回，模型可能迟迟不说话：15 秒内没有音频就自动回到聆听，
+        // 避免用户一直卡在"思考中"却没有任何反馈。
+        this._clearToolWatchdog()
+        this._toolWatchdog = setTimeout(() => {
+          this._toolWatchdog = null
+          this._toolRunning = false
+          this.onState('listening')
+          this.onError('这次没等到回答，请再说一次')
+        }, 15000)
         break
       case 'response.done':
-        // 一轮语音输出结束；播放队列排空后由播放调度切回聆听
+        // 模型这一轮已经响应（可能还没播完），取消兜底计时
+        this._clearTurnWatchdog()
+        this._clearToolWatchdog()
+        // 完全没有音频返回（例如只生成文本）时，别停在"思考中"
+        if (!this._playing && !this._toolRunning) this.onState('listening')
         break
       case 'error':
         console.warn('[Voice] server error event:', evt.error)
@@ -247,6 +273,8 @@ export class RealtimeSession {
   _playPcm(arrayBuffer) {
     const i16 = new Int16Array(arrayBuffer)
     if (!i16.length) return
+    this._clearTurnWatchdog()   // 模型已经开口，取消兜底计时
+    this._clearToolWatchdog()
     const f32 = new Float32Array(i16.length)
     for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 0x8000
 
@@ -302,6 +330,31 @@ export class RealtimeSession {
     }
   }
 
+  _clearToolWatchdog() {
+    if (this._toolWatchdog) {
+      clearTimeout(this._toolWatchdog)
+      this._toolWatchdog = null
+    }
+  }
+
+  _clearTurnWatchdog() {
+    if (this._turnWatchdog) {
+      clearTimeout(this._turnWatchdog)
+      this._turnWatchdog = null
+    }
+  }
+
+  /** 用户说完/模型开始生成后开始计时：15 秒还没开口就回到聆听，别一直"思考中" */
+  _startTurnWatchdog() {
+    this._clearTurnWatchdog()
+    this._turnWatchdog = setTimeout(() => {
+      this._turnWatchdog = null
+      if (this._playing || this._toolRunning) return
+      this.onState('listening')
+      this.onError('这次没等到回答，请再说一次')
+    }, 15000)
+  }
+
   _clearPlayback() {
     this._playQueue = []
     this._nextStartTime = 0
@@ -324,6 +377,8 @@ export class RealtimeSession {
 
   stop() {
     this._closed = true
+    this._clearTurnWatchdog()
+    this._clearToolWatchdog()
     this._playQueue = []
     try { this.workletNode && this.workletNode.disconnect() } catch {}
     try { this.procNode && this.procNode.disconnect() } catch {}

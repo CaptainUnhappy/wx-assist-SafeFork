@@ -785,8 +785,12 @@ export default function VoiceCall({ open, onClose }) {
   // AI 回合内不接受输入，这里只留空（旧逻辑会在 thinking 阶段打断自己）
   const handleSpeechStart = useCallback(() => {}, [])
 
-  /** 半双工下的手动打断：停掉当前播放，回到聆听 */
+  /** 手动打断/取消：停掉当前播放，回到聆听 */
   const interruptSpeaking = useCallback(() => {
+    // 实时通道：让服务端取消当前这轮（工具还在跑也能先退出"思考中"）
+    if (modeRef.current === 'realtime' && realtimeRef.current) {
+      try { realtimeRef.current.sendCancel() } catch {}
+    }
     abortFetch(); newSpeakingGeneration()
     sentenceBufRef.current = ''
     setPhaseBoth('listening')
@@ -1201,9 +1205,10 @@ export default function VoiceCall({ open, onClose }) {
                     {toolHint}…
                   </motion.span>
                 )}
-                {/* 标准模式是半双工：AI 回合内不收麦克风，打断/取消要手动点 */}
+                {/* 打断/取消：标准模式半双工全程手动；实时模式在"思考中"也提供取消出口 */}
                 <AnimatePresence>
-                  {(phase === 'speaking' || phase === 'thinking') && channel?.mode !== 'realtime' && (
+                  {(phase === 'thinking'
+                    || (phase === 'speaking' && channel?.mode !== 'realtime')) && (
                     <motion.button
                       initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
                       onClick={interruptSpeaking}

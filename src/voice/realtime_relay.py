@@ -72,6 +72,9 @@ VOICE_INSTRUCTIONS = (
 _AUDIO_DELTA = "response.audio.delta"
 _FUNC_CALL_DONE = "response.function_call_arguments.done"
 
+# 工具执行超时：超过就放弃等待并回一句超时提示，避免整通电话卡在"思考中"
+TOOL_TIMEOUT_SEC = 20
+
 
 def realtime_configured() -> bool:
     """是否已启用端到端实时语音（需开关 + Key）。"""
@@ -134,6 +137,8 @@ class RealtimeRelay:
         # call_id → (name, arguments)
         self._pending_funcs: dict[str, tuple[str, str]] = {}
         self._tool_schemas: list[dict] = []
+        # 工具结果回传后，等模型开口的计时起点（拿到首个音频分片时打日志）
+        self._await_model_since: float | None = None
 
     # ── 生命周期（由 server WS 层调用，均为同步）─────────────────────
 
@@ -316,6 +321,12 @@ class RealtimeRelay:
         if etype == _AUDIO_DELTA:
             b64 = event.get("delta", "")
             if b64:
+                if self._await_model_since is not None:
+                    logger.info(
+                        "[VOICE-RT] sid=%s first audio after tool in %.0fms",
+                        self.sid,
+                        (time.monotonic() - self._await_model_since) * 1000)
+                    self._await_model_since = None
                 try:
                     self._browser_send(base64.b64decode(b64))
                 except Exception:
@@ -355,17 +366,31 @@ class RealtimeRelay:
         arguments = item.get("arguments", "{}") or "{}"
 
         self._emit({"type": "voice.tool_start", "name": name})
-        logger.info("[VOICE-RT] sid=%s function_call %s(%s)",
+        logger.info("[VOICE-RT] sid=%s tool START name=%s args=%s",
                     self.sid, name, arguments[:200])
 
         tool_t0 = time.monotonic()
-        result = await asyncio.to_thread(self._execute_tool, name, arguments)
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(self._execute_tool, name, arguments),
+                timeout=TOOL_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            result = (f"工具执行超时（超过 {TOOL_TIMEOUT_SEC} 秒），"
+                      f"请换个说法或稍后再试。")
+            logger.warning("[VOICE-RT] sid=%s tool TIMEOUT name=%s after %.0fs",
+                           self.sid, name, TOOL_TIMEOUT_SEC)
+        except Exception as e:                           # noqa: BLE001
+            result = f"工具执行出错: {e}"
+            logger.warning("[VOICE-RT] sid=%s tool ERROR name=%s: %s", self.sid, name, e)
         tool_ms = (time.monotonic() - tool_t0) * 1000
         result = result or "（工具返回为空）"
         # 控制回灌体积，音频通话不需要超长内容
         if len(result) > 6000:
             result = result[:6000] + "\n…（内容过长已截断）"
 
+        logger.info("[VOICE-RT] sid=%s tool DONE name=%s %.0fms result_len=%d",
+                    self.sid, name, tool_ms, len(result))
         self._call.log_tool(name, arguments, result, tool_ms)
         self._emit({"type": "voice.tool_done", "name": name,
                     "preview": result[:160]})
@@ -383,6 +408,10 @@ class RealtimeRelay:
             "type": "response.create",
             "response": {"modalities": ["audio", "text"]},
         })
+        # 从这里开始等模型开口（拿到首个音频分片时会计时打日志）
+        self._await_model_since = time.monotonic()
+        logger.info("[VOICE-RT] sid=%s tool result sent upstream, waiting for model audio",
+                    self.sid)
 
     def _execute_tool(self, name: str, arguments: str) -> str:
         """同步执行本地/MCP 工具（在工作线程中，不阻塞事件循环）。"""
